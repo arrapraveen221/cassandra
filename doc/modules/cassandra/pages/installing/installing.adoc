@@ -58,6 +58,7 @@ Install the Debian build on Ubuntu and other Debian-based distributions if you w
 Note that both the YUM and APT methods required `root` permissions and will install the binaries and configuration files as the `cassandra` OS user.
 ====
 
+[[installing-the-docker-image]]
 == Install with Docker
 
 . Pull the docker image. For the latest image, use:
@@ -85,12 +86,13 @@ This example uses the name `cass_cluster`.
 include::cassandra:example$BASH/docker_cqlsh.sh[]
 ----
 
+[[installing-the-binary-tarball]]
 == Install tarball file
 
 include::cassandra:partial$java_version.adoc[]
 
 . Download the binary tarball from one of the mirrors on the {cass_url}download/[Apache Cassandra Download] site.
-For example, to download Cassandra {40_version}:
+For example, to download Cassandra 4.0 version:
 +
 [source,shell]
 ----
@@ -185,6 +187,7 @@ include::cassandra:partial$tail_syslog.adoc[]
 +
 include::cassandra:partial$nodetool_and_cqlsh.adoc[]
 
+[[installing-the-debian-packages]]
 == Install as Debian package
 
 include::cassandra:partial$java_version.adoc[]
@@ -236,6 +239,7 @@ include::cassandra:partial$tail_syslog.adoc[]
 +
 include::cassandra:partial$nodetool_and_cqlsh_nobin.adoc[]
 
+[[installing-the-rpm-packages]]
 == Install as RPM package
 
 include::cassandra:partial$java_version.adoc[]

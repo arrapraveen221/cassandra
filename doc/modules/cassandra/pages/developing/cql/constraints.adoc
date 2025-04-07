@@ -41,7 +41,7 @@ ALTER TABLE [IF EXISTS] <table> ALTER [IF EXISTS] <column> DROP CHECK;
 
 === SCALAR CONSTRAINT
 
-Defines a comparator against a numeric type. It support all numeric types supported in Cassandra, with all the regular
+Defines a comparator against a numeric type. It supports all numeric types supported in Cassandra, with all the regular
 comparators.
 
 For example, we can define constraints that ensure that i is bigger or equal than 100 but smaller than 1000.
@@ -225,7 +225,7 @@ constraint as it is not a valid JSON."
 
 === REGEXP constraint
 
-Defines a constraint which checks text-like values againt a regular expression.
+Defines a constraint which checks text-like values against a regular expression.
 
 ----
 CREATE TABLE ks.tb (

@@ -1,3 +1,4 @@
+[[counters]]
 = Using a counter
 :description: A counter is a special column for storing a number that is updated by increments or decrements.
 
@@ -10,20 +11,20 @@ To load data into a counter column, or to increase or decrease the value of the 
 
 . Create a table for the counter column.
 +
-[source,language-cql]
+[source,sql]
 ----
 include::cassandra:example$CQL/popular_count-table.cql[tag=create]
 ----
 
-. Loading data into a counter column is different than other tables.
+. Loading data into a counter column differs from loading data into other tables.
 The data is updated rather than inserted.
 +
-[source,language-cql]
+[source,sql]
 ----
 include::cassandra:example$CQL/popular_count-table.cql[tag=batch]
 ----
 +
-[source,language-cql]
+[source,sql]
 ----
 include::cassandra:example$CQL/popular_count-table.cql[tag=count]
 ----
@@ -35,7 +36,7 @@ include::cassandra:example$CQL/popular_count-table.cql[tag=count]
 CQL::
 +
 --
-[source,language-cql]
+[source,sql]
 ----
 include::cassandra:example$CQL/popular_count-table.cql[tag=select]
 ----

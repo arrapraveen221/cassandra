@@ -32,11 +32,11 @@ two columns named "myKey" and "value", you would do the following:
 include::cassandra:example$CQL/insert_json.cql[]
 ----
 
-By default (or if `DEFAULT NULL` is explicitly used), a column omitted
-from the `JSON` map will be set to `NULL`, meaning that any pre-existing
-value for that column will be removed (resulting in a tombstone being
-created). Alternatively, if the `DEFAULT UNSET` directive is used after
-the value, omitted column values will be left unset, meaning that
+By default, or when DEFAULT NULL is explicitly specified, a column that is not
+included in the JSON map will be set to NULL. This means that any existing value for
+that column is deleted with a tombstone.
+If the `DEFAULT UNSET` directive is used after
+the value, omitted column values are unset, and any
 pre-existing values for those column will be preserved.
 
 == JSON Encoding of Cassandra Data Types
@@ -44,7 +44,7 @@ pre-existing values for those column will be preserved.
 Where possible, Cassandra will represent and accept data types in their
 native `JSON` representation. Cassandra will also accept string
 representations matching the CQL literal format for all single-field
-types. For example, floats, ints, UUIDs, and dates can be represented by
+types. For example, floats, integers, UUIDs, and dates can be represented by
 CQL literal strings. However, compound types, such as collections,
 tuples, and user-defined types must be represented by native `JSON`
 collections (maps and lists) or a JSON-encoded string representation of

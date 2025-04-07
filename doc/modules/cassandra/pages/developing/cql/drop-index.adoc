@@ -15,7 +15,7 @@ DROP INDEX [ IF EXISTS ] [<keyspace_name>.]<index_name> ;
 .Syntax legend
 [%collapsible]
 ====
-include:cassandra:partial$cql-syntax-legend.adoc[]
+include::cassandra:partial$cql-syntax-legend.adoc[]
 ====
 
 == Example

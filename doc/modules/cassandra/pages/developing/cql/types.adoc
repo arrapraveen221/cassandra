@@ -72,13 +72,13 @@ Counters have a number of important limitations:
 * A table that contains a counter can only contain counters. In other
 words, either all the columns of a table outside the `PRIMARY KEY` have
 the `counter` type, or none of them have it.
-* Counters do not support xref:cassandra:developing/cql/dml.adoc#writetime-and-ttl-function[expiration].
+* Counters do not support xref:cassandra:developing/cql/functions.adoc#writetime-and-ttl-functions[expiration].
 * The deletion of counters is supported, but is only guaranteed to work
 the first time you delete a counter. In other words, you should not
 re-update a counter that you have deleted (if you do, proper behavior is
 not guaranteed).
 * Counter updates are, by nature, not
-https://en.wikipedia.org/wiki/Idempotence[idemptotent]. An important
+https://en.wikipedia.org/wiki/Idempotence[idempotent]. An important
 consequence is that if a counter update fails unexpectedly (timeout or
 loss of connection to the coordinator node), the client has no way to
 know if the update has been applied or not. In particular, replaying the
@@ -89,13 +89,13 @@ update may or may not lead to an over count.
 
 Values of the `timestamp` type are encoded as 64-bit signed integers
 representing a number of milliseconds since the standard base time known
-as https://en.wikipedia.org/wiki/Unix_time[the epoch]: January 1 1970 at
+as https://en.wikipedia.org/wiki/Unix_time[the epoch]: January 1st, 1970 at
 00:00:00 GMT.
 
 Timestamps can be input in CQL either using their value as an `integer`,
 or using a `string` that represents an
 https://en.wikipedia.org/wiki/ISO_8601[ISO 8601] date. For instance, all
-of the values below are valid `timestamp` values for Mar 2, 2011, at
+the values below are valid `timestamp` values for Mar 2, 2011, at
 04:05:00 AM, GMT:
 
 * `1299038700000`
@@ -203,7 +203,7 @@ types of those collections is defined by:
 include::cassandra:example$BNF/collection_type.bnf[]
 ----
 
-and their values can be inputd using collection literals:
+and their values can be inputted using collection literals:
 
 [source,bnf]
 ----
@@ -215,7 +215,7 @@ collection literals.
 
 === Noteworthy characteristics
 
-Collections are meant for storing/denormalizing relatively small amount
+Collections are meant for storing/de-normalizing relatively small amount
 of data. They work well for things like “the phone numbers of a given
 user”, “labels applied to an email”, etc. But when items are expected to
 grow unbounded (“all messages sent by a user”, “events registered by a
@@ -231,13 +231,11 @@ has to be read (and reading one is not paged internally).
 read-before-write internally, some operations on lists do. Further, some
 lists operations are not idempotent by nature (see the section on
 xref:cassandra:developing/cql/types.adoc#lists[lists] below for details), making their retry in case of
-timeout problematic. It is thus advised to prefer sets over lists when
-possible.
+timeout problematic. Therefore, it is recommended to use sets instead of lists whenever possible.
 
-Please note that while some of those limitations may or may not be
-removed/improved upon in the future, it is a anti-pattern to use a
-(single) collection to store large amounts of data.
+It is an anti-pattern to store large amounts of data in a single collection.
 
+[[maps]]
 === Maps
 
 A `map` is a (sorted) set of key-value pairs, where keys are unique and
@@ -279,6 +277,7 @@ include::cassandra:example$CQL/update_ttl_map.cql[]
 will only apply the TTL to the `{ 'color' : 'green' }` record, the rest
 of the map remaining unaffected.
 
+[[sets]]
 === Sets
 
 A `set` is a (sorted) collection of unique values. You can define and
@@ -308,6 +307,7 @@ include::cassandra:example$CQL/delete_set.cql[]
 
 Lastly, for xref:cassandra:developing/cql/types.adoc#sets[sets], TTLs are only applied to newly inserted values.
 
+[[lists]]
 === Lists
 
 [NOTE]
@@ -341,7 +341,7 @@ include::cassandra:example$CQL/update_list.cql[]
 ====
 The append and prepend operations are not idempotent by nature. So in
 particular, if one of these operations times out, then retrying the
-operation is not safe and it may (or may not) lead to
+operation is not safe, and it may (or may not) lead to
 appending/prepending the value twice.
 ====
 
@@ -374,7 +374,7 @@ include::cassandra:example$CQL/delete_all_elements_list.cql[]
 [WARNING]
 .Warning
 ====
-Setting and removing an element by position and removing occurences of
+Setting and removing an element by position and removing occurrences of
 particular values incur an internal _read-before-write_. These operations will
 run slowly and use more resources than usual updates (with the
 exclusion of conditional write that have their own cost).
@@ -503,6 +503,7 @@ type, table or function will result in an error.
 If the type dropped does not exist, an error will be returned unless
 `IF EXISTS` is used, in which case the operation is a no-op.
 
+[[tuples]]
 == Tuples
 
 CQL also support tuples and tuple types (where the elements can be of
@@ -522,18 +523,19 @@ include::cassandra:example$CQL/tuple.cql[]
 ----
 
 Unlike other composed types, like collections and UDTs, a tuple is always
-`frozen <frozen>` (without the need of the `frozen` keyword)
+`frozen <frozen>` (without the need of the `frozen` keyword),
 and it is not possible to update only some elements of a tuple (without
 updating the whole tuple). Also, a tuple literal should always have the
 same number of value than declared in the type it is a tuple of (some of
-those values can be null but they need to be explicitly declared as so).
+those values can be null, but they need to be explicitly declared as so).
 
+[[custom-types]]
 == Custom Types
 
 [NOTE]
 ====
 Custom types exists mostly for backward compatibility purposes and their
-usage is discouraged. Their usage is complex, not user friendly and the
+usage is discouraged. Their usage is complex, not user-friendly and the
 other provided types, particularly xref:cassandra:developing/cql/types.adoc#udts[user-defined types], should
 almost always be enough.
 ====
@@ -550,5 +552,5 @@ extends the server side `AbstractType` class and that can be loaded by
 Cassandra (it should thus be in the `CLASSPATH` of every node running
 Cassandra). That class will define what values are valid for the type
 and how the time sorts when used for a clustering column. For any other
-purpose, a value of a custom type is the same than that of a `blob`, and
+purpose, a value of a custom type is the same as that of a `blob`, and
 can in particular be input using the `blob` literal syntax.

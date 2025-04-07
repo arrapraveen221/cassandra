@@ -41,7 +41,7 @@ users will access reservations:
 * Q8. Lookup all reservations by guest name.
 * Q9. View guest details.
 
-All of the queries are shown in the context of the workflow of the
+All the queries are shown in the context of the workflow of the
 application in the figure below. Each box on the diagram represents a
 step in the application workflow, with arrows indicating the flows
 between steps and the associated query. If you've modeled the
@@ -53,7 +53,7 @@ to obtain detailed description of the hotel. The act of booking a room
 creates a reservation record that may be accessed by the guest and hotel
 staff at a later time through various additional queries.
 
-image::cassandra:developing/data-modeling/data_modeling_hotel_queries.png[image]
+image::data_modeling_hotel_queries.png[image]
 
 _Material adapted from Cassandra, The Definitive Guide. Published by
 O'Reilly Media, Inc. Copyright © 2020 Jeff Carpenter, Eben Hewitt. All

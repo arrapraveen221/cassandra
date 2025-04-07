@@ -40,7 +40,7 @@ include::cassandra:example$CQL/create_index.cql[]
 The `USING` keyword optionally specifies an index type. There are two built-in types:
 
 - legacy_local_table - (default) legacy secondary index, implemented as a hidden local table
-- sai - "storage-attched" index, implemented via optimized SSTable/Memtable-attached indexes
+- sai - "storage-attached" index, implemented via optimized SSTable/Memtable-attached indexes
 
 To create a custom index, a fully qualified class name must be specified.
 
@@ -66,5 +66,5 @@ The `DROP INDEX` statement is used to drop an existing secondary index.
 The argument of the statement is the index name, which may optionally
 specify the keyspace of the index.
 
-If the index does not exists, the statement will return an error, unless
+If the index does not exist, the statement will return an error, unless
 `IF EXISTS` is used in which case the operation is a no-op.

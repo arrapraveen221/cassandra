@@ -19,9 +19,9 @@ with Netty
 (https://issues.apache.org/jira/browse/CASSANDRA-12229[CASSANDRA-12229]).
 It replaces the single-threaded (or sequential), synchronous, blocking
 model of streaming messages and transfer of files. Netty supports
-non-blocking, asynchronous, multi-threaded streaming with which multiple
+non-blocking, asynchronous, multithreaded streaming with which multiple
 connections are opened simultaneously. Non-blocking implies that threads
-are not blocked as they don’t wait for a response for a sent request. A
+are not blocked as they do not wait for a response after sending a request. A
 response could be returned in a different thread. With asynchronous,
 connections and threads are decoupled and do not have a 1:1 relation.
 Several more connections than threads may be opened.

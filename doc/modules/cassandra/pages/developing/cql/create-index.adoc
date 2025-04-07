@@ -8,7 +8,7 @@ After an index has been created, it is automatically updated when data in the co
 Indexing via this `CREATE INDEX` command can impact performance.
 Before creating an index, be aware of when and xref:cassandra:developing/cql/indexing/2i/2i-when-to-use.adoc#when-no-index[when not to create an index].
 
-Use xref:cassandra:developing/cql/indexing/create-custom-index.adoc[CREATE CUSTOM INDEX] for Storage-Attached Indexes (SAI).
+Use xref:cassandra:developing/cql/create-custom-index.adoc#create-custom-index[CREATE CUSTOM INDEX] for Storage-Attached Indexes (SAI).
 
 *Restriction:* Indexing counter columns is not supported.
 For maps, index the key, value, or entries.
@@ -27,7 +27,7 @@ CREATE INDEX [ IF NOT EXISTS ] <index_name>
 .Syntax legend
 [%collapsible]
 ====
-include:cassandra:partial$cql-syntax-legend.adoc[]
+include::cassandra:partial$cql-syntax-legend.adoc[]
 ====
 
 *index_name*::
@@ -72,7 +72,7 @@ include::cassandra:example$CQL/sai/cyclist_career_teams-table.cql[tag=createidxs
 [[CreatIdxCollKey]]
 === Creating an index on map keys
 
-You can create an index on xref:cassandra:developingindexing/2i/2i-create-on-collection.adoc[map collection keys].
+You can create an index on xref:cassandra:developing/cql/indexing/2i/_2i-create-on-collection.adoc[map collection keys].
 If an index of the map values of the collection exists, drop that index before creating an index on the map collection keys.
 Assume a cyclist table contains this map data:
 

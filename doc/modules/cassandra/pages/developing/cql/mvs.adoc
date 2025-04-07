@@ -59,12 +59,12 @@ The select statement of a materialized view creation defines which of
 the base table is included in the view. That statement is limited in a
 number of ways:
 
-* the xref:cassandra:developing/cql/mvs.adoc#selection-clause[selection] is limited to those that only
+* the selection is limited to those that only
 select columns of the base table. In other words, you can't use any
 function (aggregate or not), casting, term, etc. Aliases are also not
 supported.
 You can however use * as a shortcut of selecting all columns.
-Further, xref:cassandra:developing/cql/types.adoc#static-columns[static columns] cannot be included in a materialized view.
+Further, xref:cassandra:developing/cql/ddl.adoc#static-column[static columns] cannot be included in a materialized view.
 Thus, a `SELECT *` command isn't allowed if the base table has static columns.
 The `WHERE` clause has the following restrictions:
 
@@ -73,8 +73,9 @@ The `WHERE` clause has the following restrictions:
 ** no other restriction is allowed
 ** cannot have columns that are part of the _view_ primary key be null, they must always be at least restricted by a `IS NOT NULL`
 restriction (or any other restriction, but they must have one).
-* cannot have an xref:cassandra:developing/cql/dml.adoc#ordering-clause[ordering clause], a xref:cassandra:developing/cql/dml.adoc#limit-clause[limit], or xref:cassandra:developing/cql/dml.adoc#allow-filtering[ALLOW FILTERING]
+* cannot have an xref:cassandra:developing/cql/dml.adoc#ordering-clause[ordering clause], a xref:cassandra:developing/cql/dml.adoc#limit-clause[limit], or xref:cassandra:developing/cql/dml.adoc#allow-filtering[ALLOW FILTERING
 
+[[mv-primary-key]]
 === MV primary key
 
 A view must have a primary key and that primary key must conform to the
@@ -107,11 +108,11 @@ but the following ones are *not* allowed:
 include::cassandra:example$CQL/mv_table_error.cql[]
 ----
 
+[[mv-options]]
 === MV options
 
 A materialized view is internally implemented by a table and as such,
-creating a MV allows the `same options than
-creating a table <create-table-options>`.
+creating a MV allows the same options as xref:cassandra:reference/cql-commands/create-table.adoc[table creation].
 
 [[alter-materialized-view-statement]]
 == ALTER MATERIALIZED VIEW
@@ -124,9 +125,9 @@ the `ALTER MATERIALIZED VIEW` statement:
 include::cassandra:example$BNF/alter_mv_statement.bnf[]
 ----
 
-The options that can be updated are the same than at creation time and
-thus the `same than for tables
-<create-table-options>`. If the view does not exist, the statement will return an error, unless `IF EXISTS` is used in which case the operation is a no-op.
+The options that can be updated are the same as
+xref:cassandra:reference/cql-commands/alter-table.adoc[alter table].
+If the view does not exist, the statement will return an error, unless `IF EXISTS` is used in which case the operation will have no effect.
 
 [[drop-materialized-view-statement]]
 == DROP MATERIALIZED VIEW
@@ -139,7 +140,7 @@ statement:
 include::cassandra:example$BNF/drop_mv_statement.bnf[]
 ----
 
-If the materialized view does not exists, the statement will return an
+If the materialized view does not exist, the statement will return an
 error, unless `IF EXISTS` is used in which case the operation is a
 no-op.
 
@@ -152,5 +153,5 @@ Removal of columns not selected in the Materialized View (via
 `DELETE unselected_column FROM base`) may shadow missed updates to other
 columns received by hints or repair. For this reason, we advise against
 doing deletions on base columns not selected in views until this is
-fixed on https://issues.apache.org/jira/browse/CASSANDRA-13826[CASSANDRA-13826].
+fixed on CASSANDRA-13826.
 ====

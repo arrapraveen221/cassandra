@@ -88,7 +88,7 @@ sequential consistency with real-time constraints, and it ensures
 transaction isolation with compare-and-set (CAS) transactions. With CAS
 replica data is compared and data that is found to be out of date is set
 to the most consistent value. Reads with linearizable consistency allow
-reading the current state of the data, which may possibly be
+reading the current state of the data, which possibly may be
 uncommitted, without making a new addition or update.
 
 == Batched Writes

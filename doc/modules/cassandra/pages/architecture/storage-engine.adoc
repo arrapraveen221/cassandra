@@ -93,7 +93,7 @@ Depending on the xref:cassandra:managing/configuration/cass_yaml_file.adoc#memta
 If Cassandra crashes before flushing the memtable, it can restore acknowledged writes by replaying the commitLog.
 
 The memtable stores writes in sorted order until reaching a configurable limit.
-When the limit is reached, memtables are flushed onto disk and become immutable xref:#sstables[SSTables].
+When the limit is reached, memtables are flushed onto disk and become immutable SSTables.
 Flushing can be triggered in several ways:
 
 * The memory usage of the memtables exceeds the configured threshold (see xref:cassandra:managing/configuration/cass_yaml_file.adoc#memtable_cleanup_threshold[`memtable_cleanup_threshold`])
@@ -244,11 +244,11 @@ To use the BTI formats configure it `cassandra.yaml` like
 
 [source]
 ----
-sstable:
+SSTable:
   selected_format: bti
 ----
 
-Versions come from https://github.com/apache/cassandra/blob/f16fb6765b8a3ff8f49accf61c908791520c0d6e/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java#L302[BtiFormat#BtiVersion].
+Versions come from https://github.com/apache/cassandra/blob/cassandra-5.0/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java#L287[BtiFormat#BtiVersion].
 
 For implementation docs see https://github.com/apache/cassandra/blob/cassandra-5.0/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.md[BtiFormat.md].
 

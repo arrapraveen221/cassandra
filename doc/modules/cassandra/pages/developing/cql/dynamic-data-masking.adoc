@@ -153,7 +153,7 @@ include::example$CQL/dynamic-data-masking.cql[tag=select-with-select-masked]
 
 == Custom functions
 
-xref:developing/cql/functions.adoc#user-defined-functions[User-defined functions (UDFs)] can be attached to a table column.
+xref:developing/cql/functions.adoc#user-defined-scalar-functions[User-defined functions (UDFs)] can be attached to a table column.
 The UDFs used for masking should belong to the same keyspace as the masked table.
 The column value to mask will be passed as the first argument of the attached UDF.
 Thus, the UDFs attached to a column should have at least one argument,

@@ -4,34 +4,42 @@ Here are known Cassandra client drivers organized by language. Before
 choosing a driver, you should verify the Cassandra version and
 functionality supported by a specific driver.
 
+[[java]]
 == Java
 
 * https://github.com/apache/cassandra-java-driver[Java Driver for Apache Cassandra]
 
+[[python]]
 == Python
 
 * https://github.com/datastax/python-driver[Datastax Python driver]
 
+[[ruby]]
 == Ruby
 
 * https://github.com/datastax/ruby-driver[Datastax Ruby driver]
 
+[[c-net]]
 == C# / .NET
 
 * https://github.com/datastax/csharp-driver[Datastax C# driver]
 
+[[nodejs]]
 == Nodejs
 
 * https://github.com/datastax/nodejs-driver[Datastax Nodejs driver]
 
+[[php]]
 == PHP
 
 * https://github.com/datastax/php-driver/[Datastax PHP driver]
 
+[[c]]
 == C++
 
 * https://github.com/datastax/cpp-driver[Datastax C++ driver]
 
+[[scala]]
 == Scala
 
 * https://github.com/datastax/spark-cassandra-connector[Datastax Spark
@@ -39,39 +47,47 @@ connector]
 * https://github.com/newzly/phantom[Phantom]
 * https://github.com/getquill/quill[Quill]
 
+[[clojure]]
 == Clojure
 
 * https://github.com/mpenet/alia[Alia]
 * https://github.com/clojurewerkz/cassaforte[Cassaforte]
 * https://github.com/mpenet/hayt[Hayt]
 
+[[erlang]]
 == Erlang
 
 * https://github.com/matehat/cqerl[CQerl]
 * https://github.com/silviucpp/erlcass[Erlcass]
 
+[[go]]
 == Go
 
 * https://github.com/gocql/gocql[GoCQL]
 
+[[haskell]]
 == Haskell
 
 * https://github.com/ozataman/cassy[Cassy]
 
+[[rust]]
 == Rust
 
 * https://github.com/neich/rust-cql[Rust CQL]
 
+[[perl]]
 == Perl
 
 * https://github.com/tvdw/perl-dbd-cassandra[Cassandra::Client and
 DBD::Cassandra]
 
+[[elixir]]
 == Elixir
 
 * https://github.com/lexhide/xandra[Xandra]
 * https://github.com/matehat/cqex[CQEx]
 
+[[dart]]
 == Dart
 
 * https://github.com/achilleasa/dart_cassandra_cql[dart_cassandra_cql]

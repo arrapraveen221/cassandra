@@ -7,10 +7,10 @@ CQL distinguishes between _reserved_ and _non-reserved_ keywords.
 Reserved keywords cannot be used as identifier, they are truly reserved
 for the language (but one can enclose a reserved keyword by
 double-quotes to use it as an identifier). Non-reserved keywords however
-only have a specific meaning in certain context but can used as
-identifier otherwise. The only _raison d'être_ of these non-reserved
-keywords is convenience: some keyword are non-reserved when it was
-always easy for the parser to decide whether they were used as keywords
+only have a specific meaning in certain context but can be used as
+identifier otherwise. The reason for non-reserved
+keywords is flexibility: keywords are non-reserved when it's
+easy for the parser to decide whether they were used as keywords
 or not.
 
 [width="48%",cols="60%,40%",options="header",]

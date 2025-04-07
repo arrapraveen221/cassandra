@@ -41,7 +41,7 @@ If a role has the `LOGIN` privilege, clients may identify as that role
 when connecting. For the duration of that connection, the client will
 acquire any roles and privileges granted to that role.
 
-Only a client with with the `CREATE` permission on the database roles
+Only a client with the `CREATE` permission on the database roles
 resource may issue `CREATE ROLE` requests (see the
 xref:cassandra:developing/cql/security.adoc#cql-permissions[relevant section]), unless the client is a
 `SUPERUSER`. Role management in Cassandra is pluggable and custom
@@ -169,9 +169,9 @@ Currently connected sessions will remain connected and will retain the
 ability to perform any database actions which do not require
 xref:cassandra:developing/cql/security.adoc#authorization[authorization].
 However, if authorization is enabled, xref:cassandra:developing/cql/security.adoc#cql-permissions[permissions] of the dropped role are also revoked,
-subject to the xref:cassandra:developing/cql/security.adoc#auth-caching[caching options] configured in xref:cassandra:developing/cql/configuring.adoc#cassandra.yaml[cassandra-yaml] file.
+subject to the xref:cassandra:developing/cql/security.adoc#auth-caching[caching options] configured in xref:cassandra:managing/configuration/cass_yaml_file.adoc[cassandra.yaml] file.
 Should a dropped role be subsequently recreated and have new xref:security.adoc#grant-permission-statement[permissions] or
-xref:security.adoc#grant-role-statement[roles] granted to it, any client sessions still
+xref:security.adoc#grant-role-statement[roles]` granted to it, any client sessions still
 connected will acquire the newly granted permissions and roles.
 ====
 
@@ -253,7 +253,7 @@ acquired:
 include::cassandra:example$CQL/list_roles_of.cql[]
 ----
 
-This example lists all roles directly granted to `bob` without including any of the
+This example lists all roles directly granted to `Bob` without including any of the
 transitively acquired ones:
 
 [source,cql]
@@ -344,7 +344,7 @@ Existing users can be listed using the `LIST USERS` statement:
 include::cassandra:example$BNF/list_users_statement.bnf[]
 ----
 
-Note that this statement is equivalent to xref:security.adoc#list-roles-statement[LIST ROLES], but only roles with the `LOGIN` privilege are included in the output.
+Note that this statement is equivalent to xref:cassandra:developing/cql/security.adoc#list-roles-statement[`LIST ROLES], but only roles with the `LOGIN` privilege are included in the output.
 
 == Data Control
 
@@ -647,18 +647,18 @@ transitively from any other roles:
 include::cassandra:example$CQL/list_all_perm.cql[]
 ----
 
-Show all permissions on `keyspace1.table1` granted to `bob`, including
+Show all permissions on `keyspace1.table1` granted to `Bob`, including
 those acquired transitively from any other roles. This also includes any
 permissions higher up the resource hierarchy which can be applied to
-`keyspace1.table1`. For example, should `bob` have `ALTER` permission on
+`keyspace1.table1`. For example, should `Bob` have `ALTER` permission on
 `keyspace1`, that would be included in the results of this query. Adding
 the `NORECURSIVE` switch restricts the results to only those permissions
-which were directly granted to `bob` or one of `bob`'s roles:
+which were directly granted to `Bob` or one of `Bob`'s roles:
 
 [source,cql]
 ----
 include::cassandra:example$CQL/list_select_perm.cql[]
 ----
 
-Show any permissions granted to `carlos` or any roles assigned to `carlos`,
+Show any permissions granted to `carlos` or any of `carlos`'s roles,
 limited to `SELECT` permissions on any resource.

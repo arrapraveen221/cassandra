@@ -67,6 +67,7 @@ preferable.
 `Deflate` is kept for backwards compatibility and `Zstd` will typically
 be preferable.
 
+[[compression-options]]
 == Configuring Compression
 
 Compression is configured on a per-table basis as an optional argument

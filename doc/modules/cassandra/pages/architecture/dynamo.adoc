@@ -55,7 +55,7 @@ hash of the key modulo the number of buckets. For example, if you want
 to distribute data to 100 nodes using naive hashing you might assign
 every node to a bucket between 0 and 100, hash the input key modulo 100,
 and store the data on the associated bucket. In this naive scheme,
-however, adding a single node might invalidate almost all of the
+however, adding a single node might invalidate almost all the
 mappings.
 
 Cassandra instead maps every node to one or more tokens on a continuous
@@ -204,8 +204,8 @@ rack-aware behavior has some potentially
 https://issues.apache.org/jira/browse/CASSANDRA-3810[surprising
 implications]. For example, if there are not an even number of nodes in
 each rack, the data load on the smallest rack may be much higher.
-Similarly, if a single node is bootstrapped into a brand new rack, it
-will be considered a replica for the entire ring. For this reason, many
+In the same way, when a single node is initialized in a completely new rack,
+it will be regarded as a replica for the entire ring. For this reason, many
 operators choose to configure all nodes in a single availability zone or
 similar failure domain as a single "rack".
 
@@ -227,7 +227,7 @@ distinct nodes have been added to the set of replicas.
 
 ==== Transient Replication
 
-Transient replication is an experimental feature in Cassandra {40_version} not
+Transient replication is an experimental feature in Cassandra 4.0 version not
 present in the original Dynamo paper. This feature allows configuration of a
 subset of replicas to replicate only data that hasn't been incrementally
 repaired. This configuration decouples data redundancy from availability.
@@ -247,7 +247,7 @@ data. Configure it by specifying replication factor as
 
 Transiently replicated keyspaces only support tables created with
 `read_repair` set to `NONE`; monotonic reads are not currently
-supported. You also can't use `LWT`, logged batches, or counters in {40_version}.
+supported. You also can't use `LWT`, logged batches, or counters in 4.0 version.
 You will possibly never be able to use materialized views with
 transiently replicated keyspaces and probably never be able to use
 secondary indices with them.
@@ -278,7 +278,7 @@ row within a CQL partition. Rows are guaranteed to be unique by primary
 key, and each column in a row resolves concurrent mutations according to
 last-write-wins conflict resolution. This means that updates to
 different primary keys within a partition can actually resolve without
-conflict! Furthermore the CQL collection types such as maps and sets use
+conflict! Furthermore, the CQL collection types such as maps and sets use
 this same conflict-free mechanism, meaning that concurrent updates to
 maps and sets are guaranteed to resolve as well.
 
@@ -331,7 +331,7 @@ The following consistency levels are available:
 `QUORUM`::
   A majority (n/2 + 1) of the replicas must respond.
 `ALL`::
-  All of the replicas must respond.
+  All the replicas must respond.
 `LOCAL_QUORUM`::
   A majority of the replicas in the local datacenter (whichever
   datacenter the coordinator is in) must respond.
@@ -456,7 +456,7 @@ decision is primarily based on received heartbeat state. For example, if
 a node does not see an increasing heartbeat from a node for a certain
 amount of time, the failure detector "convicts" that node, at which
 point Cassandra will stop routing reads to it (writes will typically be
-written to hints). If/when the node starts heartbeating again, Cassandra
+written to hints). When the node resumes sending heartbeats again, Cassandra
 will try to reach out and connect, and if it can open communication
 channels it will mark that node as available.
 
