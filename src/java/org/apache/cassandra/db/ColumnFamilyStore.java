@@ -236,6 +236,8 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         ANTICOMPACTION,
         SCHEMA_CHANGE,
         OWNED_RANGES_CHANGE,
+        ACCORD,
+        ACCORD_TXN_GC,
         UNIT_TESTS // explicitly requested flush needed for a test
     }
 
@@ -512,7 +514,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
         {
             Directories.SSTableLister sstableFiles = directories.sstableLister(Directories.OnTxnErr.IGNORE).skipTemporary(true);
             sstables = SSTableReader.openAll(this, sstableFiles.list().entrySet(), metadata);
-            data.addInitialSSTablesWithoutUpdatingSize(sstables, this);
+            data.addInitialSSTablesWithoutUpdatingSize(sstables);
         }
 
         // compaction strategy should be created after the CFS has been prepared
@@ -3337,5 +3339,10 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean, Memtable.Owner
     public TableMetrics getMetrics()
     {
         return metric;
+    }
+
+    public TableId getTableId()
+    {
+        return metadata().id;
     }
 }

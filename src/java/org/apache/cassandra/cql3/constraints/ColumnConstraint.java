@@ -30,6 +30,7 @@ import org.apache.cassandra.cql3.constraints.ScalarColumnConstraint.ScalarColumn
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.tcm.serialization.MetadataSerializer;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static java.lang.String.format;
 
@@ -39,9 +40,9 @@ import static java.lang.String.format;
  */
 public abstract class ColumnConstraint<T>
 {
-    protected final ColumnIdentifier columnName;
+    protected ColumnIdentifier columnName;
 
-    public ColumnConstraint(ColumnIdentifier columnName)
+    public void setColumnName(ColumnIdentifier columnName)
     {
         this.columnName = columnName;
     }
@@ -116,8 +117,10 @@ public abstract class ColumnConstraint<T>
      */
     public void evaluate(AbstractType<?> valueType, ByteBuffer columnValue) throws ConstraintViolationException
     {
-        if (columnValue.capacity() == 0)
+        if (columnValue == ByteBufferUtil.EMPTY_BYTE_BUFFER)
             throw new ConstraintViolationException("Column value does not satisfy value constraint for column '" + columnName + "' as it is null.");
+        else if (valueType.isEmptyValueMeaningless() && columnValue.capacity() == 0)
+            throw new ConstraintViolationException("Column value does not satisfy value constraint for column '" + columnName + "' as it is empty.");
 
         internalEvaluate(valueType, columnValue);
     }

@@ -29,6 +29,7 @@ import com.google.common.collect.ImmutableList;
 
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.utils.ImmutableUniqueList;
 
 public class Select implements Statement
 {
@@ -39,6 +40,7 @@ FROM [keyspace_name.] table_name
    [AND clustering_filters
    [AND static_filters]]]
 [ORDER BY PK_column_name ASC|DESC]
+[PER PARTITION LIMIT N]
 [LIMIT N]
 [ALLOW FILTERING]
      */
@@ -49,7 +51,7 @@ FROM [keyspace_name.] table_name
     // where
     public final Optional<Conditional> where;
     public final Optional<OrderBy> orderBy;
-    public final Optional<Value> limit;
+    public final Optional<Value> perPartitionLimit, limit;
     public final boolean allowFiltering;
 
     public Select(List<Expression> selections)
@@ -59,15 +61,16 @@ FROM [keyspace_name.] table_name
 
     public Select(List<Expression> selections, Optional<TableReference> source, Optional<Conditional> where, Optional<OrderBy> orderBy, Optional<Value> limit)
     {
-        this(selections, source, where, orderBy, limit, false);
+        this(selections, source, where, orderBy, Optional.empty(), limit, false);
     }
 
-    public Select(List<Expression> selections, Optional<TableReference> source, Optional<Conditional> where, Optional<OrderBy> orderBy, Optional<Value> limit, boolean allowFiltering)
+    public Select(List<Expression> selections, Optional<TableReference> source, Optional<Conditional> where, Optional<OrderBy> orderBy, Optional<Value> perPartitionLimit, Optional<Value> limit, boolean allowFiltering)
     {
         this.selections = selections;
         this.source = source;
         this.where = where;
         this.orderBy = orderBy;
+        this.perPartitionLimit = perPartitionLimit;
         this.limit = limit;
         this.allowFiltering = allowFiltering;
 
@@ -96,7 +99,17 @@ FROM [keyspace_name.] table_name
 
     public Select withAllowFiltering()
     {
-        return new Select(selections, source, where, orderBy, limit, true);
+        return new Select(selections, source, where, orderBy, perPartitionLimit, limit, true);
+    }
+
+    public Select withLimit(int limit)
+    {
+        return new Select(selections, source, where, orderBy, perPartitionLimit, Optional.of(Literal.of(limit)), allowFiltering);
+    }
+
+    public Select withPerPartitionLimit(int perPartitionLimit)
+    {
+        return new Select(selections, source, where, orderBy, Optional.of(Literal.of(perPartitionLimit)), limit, allowFiltering);
     }
 
     @Override
@@ -132,6 +145,12 @@ FROM [keyspace_name.] table_name
                 sb.append("ORDER BY ");
                 orderBy.get().toCQL(sb, formatter);
             }
+            if (perPartitionLimit.isPresent())
+            {
+                formatter.section(sb);
+                sb.append("PER PARTITION LIMIT ");
+                perPartitionLimit.get().toCQL(sb, formatter);
+            }
             if (limit.isPresent())
             {
                 formatter.section(sb);
@@ -154,6 +173,7 @@ FROM [keyspace_name.] table_name
                                            + (source.isPresent() ? 1 : 0)
                                            + (where.isPresent() ? 1 : 0)
                                            + (orderBy.isPresent() ? 1 : 0)
+                                           + (perPartitionLimit.isPresent() ? 1 : 0)
                                            + (limit.isPresent() ? 1 : 0));
         es.addAll(selections);
         if (source.isPresent())
@@ -162,6 +182,8 @@ FROM [keyspace_name.] table_name
             es.add(where.get());
         if (orderBy.isPresent())
             es.add(orderBy.get());
+        if (perPartitionLimit.isPresent())
+            es.add(perPartitionLimit.get());
         if (limit.isPresent())
             es.add(limit.get());
         return es.stream();
@@ -204,6 +226,18 @@ FROM [keyspace_name.] table_name
         {
             where = this.where;
         }
+        Optional<Value> perPartitionLimit;
+        if (this.perPartitionLimit.isPresent())
+        {
+            var l = this.perPartitionLimit.get();
+            var update = l.visit(v);
+            updated |= l != update;
+            perPartitionLimit = Optional.ofNullable(update);
+        }
+        else
+        {
+            perPartitionLimit = this.perPartitionLimit;
+        }
         Optional<Value> limit;
         if (this.limit.isPresent())
         {
@@ -217,8 +251,9 @@ FROM [keyspace_name.] table_name
             limit = this.limit;
         }
         if (!updated) return this;
-        return new Select(selections, source, where, orderBy, limit, allowFiltering);
+        return new Select(selections, source, where, orderBy, perPartitionLimit, limit, allowFiltering);
     }
+
 
     public static class OrderBy implements Element
     {
@@ -313,6 +348,7 @@ FROM [keyspace_name.] table_name
         protected Optional<TableReference> source = Optional.empty();
         private Conditional.Builder where = new Conditional.Builder();
         private OrderBy.Builder orderBy = new OrderBy.Builder();
+        private Optional<Value> perPartitionLimit = Optional.empty();
         private Optional<Value> limit = Optional.empty();
         private boolean allowFiltering = false;
 
@@ -340,6 +376,13 @@ FROM [keyspace_name.] table_name
             if (selections == null)
                 throw new IllegalStateException("Unable to add '" + e.name() + "' as a selection as * was already requested");
             selections.add(e);
+            return (T) this;
+        }
+
+        public T where(Conditional conditional)
+        {
+            where = new Conditional.Builder();
+            where.add(conditional);
             return (T) this;
         }
 
@@ -377,6 +420,17 @@ FROM [keyspace_name.] table_name
             return (T) this;
         }
 
+        public T perPartitionLimit(Value limit)
+        {
+            this.perPartitionLimit = Optional.of(limit);
+            return (T) this;
+        }
+
+        public T perPartitionLimit(int limit)
+        {
+            return perPartitionLimit(Bind.of(limit));
+        }
+
         public T limit(Value limit)
         {
             this.limit = Optional.of(limit);
@@ -394,7 +448,7 @@ FROM [keyspace_name.] table_name
                               source,
                               where.isEmpty() ? Optional.empty() : Optional.of(where.build()),
                               orderBy.isEmpty() ? Optional.empty() : Optional.of(orderBy.build()),
-                              limit,
+                              perPartitionLimit, limit,
                               allowFiltering);
         }
     }
@@ -426,17 +480,31 @@ FROM [keyspace_name.] table_name
     public static class TableBasedBuilder extends BaseBuilder<TableBasedBuilder> implements Conditional.ConditionalBuilderPlus<TableBasedBuilder>
     {
         private final TableMetadata metadata;
+        private final ImmutableUniqueList<Symbol> columns;
 
         public TableBasedBuilder(TableMetadata metadata)
         {
             this.metadata = metadata;
             source = Optional.of(TableReference.from(metadata));
+            var builder = ImmutableUniqueList.<Symbol>builder();
+            metadata.allColumnsInSelectOrder().forEachRemaining(c -> builder.add(Symbol.from(c)));
+            columns = builder.buildAndClear();
         }
 
         @Override
         public TableMetadata metadata()
         {
             return metadata;
+        }
+
+        private Symbol find(String name)
+        {
+            return columns.stream().filter(s -> s.symbol.equals(name)).findAny().get();
+        }
+
+        public TableBasedBuilder columnSelection(String name)
+        {
+            return selection(find(name));
         }
     }
 }

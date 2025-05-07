@@ -30,9 +30,6 @@ import java.util.function.Consumer;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 
-import org.apache.cassandra.exceptions.UnrecoverableIllegalStateException;
-import org.apache.cassandra.metrics.StorageMetrics;
-import org.apache.cassandra.tracing.Tracing;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,10 +37,14 @@ import net.nicoulaj.compilecommand.annotations.Exclude;
 import org.apache.cassandra.concurrent.ScheduledExecutors;
 import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.exceptions.UnrecoverableIllegalStateException;
 import org.apache.cassandra.io.FSError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
-import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.journal.Params.FailurePolicy;
+import org.apache.cassandra.service.DiskErrorsHandlerService;
+import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 
 import static org.apache.cassandra.config.CassandraRelevantProperties.PRINT_HEAP_HISTOGRAM_ON_OUT_OF_MEMORY_ERROR;
@@ -86,20 +87,17 @@ public final class JVMStabilityInspector
      */
     public static void inspectThrowable(Throwable t) throws OutOfMemoryError
     {
-        inspectThrowable(t, JVMStabilityInspector::inspectDiskError);
+        inspectThrowable(t, DiskErrorsHandlerService.get()::inspectDiskError);
     }
 
     public static void inspectCommitLogThrowable(Throwable t)
     {
-        inspectThrowable(t, JVMStabilityInspector::inspectCommitLogError);
+        inspectThrowable(t, ex -> DiskErrorsHandlerService.get().inspectCommitLogError(ex));
     }
 
-    private static void inspectDiskError(Throwable t)
+    public static void inspectJournalThrowable(Throwable t, String journalName, FailurePolicy failurePolicy)
     {
-        if (t instanceof CorruptSSTableException)
-            FileUtils.handleCorruptSSTable((CorruptSSTableException) t);
-        else if (t instanceof FSError)
-            FileUtils.handleFSError((FSError) t);
+        inspectThrowable(t, th -> inspectJournalError(th, journalName, failurePolicy));
     }
 
     public static void inspectThrowable(Throwable t, Consumer<Throwable> fn) throws OutOfMemoryError
@@ -136,7 +134,14 @@ public final class JVMStabilityInspector
         }
 
         // Anything other than an OOM, we should try and heap dump to capture what's going on if configured to do so
-        HeapUtils.maybeCreateHeapDump();
+        try
+        {
+            HeapUtils.maybeCreateHeapDump();
+        }
+        catch (Throwable sub)
+        {
+            t.addSuppressed(sub);
+        }
 
         if (t instanceof InterruptedException)
             throw new UncheckedInterruptedException((InterruptedException) t);
@@ -156,7 +161,7 @@ public final class JVMStabilityInspector
         if (isUnstable)
         {
             if (!StorageService.instance.isDaemonSetupCompleted())
-                FileUtils.handleStartupFSError(t);
+                DiskErrorsHandlerService.get().handleStartupFSError(t);
             killer.killCurrentJVM(t);
         }
 
@@ -197,15 +202,17 @@ public final class JVMStabilityInspector
         }
     }
 
-    private static void inspectCommitLogError(Throwable t)
+    private static void inspectJournalError(Throwable t, String journalName, FailurePolicy failurePolicy)
     {
         if (!StorageService.instance.isDaemonSetupCompleted())
         {
-            logger.error("Exiting due to error while processing commit log during initialization.", t);
+            logger.error("Exiting due to error while processing journal {} during initialization.", journalName, t);
             killer.killCurrentJVM(t, true);
         }
-        else if (DatabaseDescriptor.getCommitFailurePolicy() == Config.CommitFailurePolicy.die)
+        else if (failurePolicy == FailurePolicy.DIE)
+        {
             killer.killCurrentJVM(t);
+        }
     }
 
     public static void killCurrentJVM(Throwable t, boolean quiet)
@@ -249,12 +256,12 @@ public final class JVMStabilityInspector
         * @param t
         *      The Throwable to log before killing the current JVM
         */
-        protected void killCurrentJVM(Throwable t)
+        public void killCurrentJVM(Throwable t)
         {
             killCurrentJVM(t, false);
         }
 
-        protected void killCurrentJVM(Throwable t, boolean quiet)
+        public void killCurrentJVM(Throwable t, boolean quiet)
         {
             if (!quiet)
             {

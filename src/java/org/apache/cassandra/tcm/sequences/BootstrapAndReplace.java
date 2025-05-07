@@ -20,6 +20,7 @@ package org.apache.cassandra.tcm.sequences;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -43,6 +44,7 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.locator.EndpointsByReplica;
 import org.apache.cassandra.locator.InetAddressAndPort;
+import org.apache.cassandra.repair.autorepair.AutoRepairUtils;
 import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.tcm.ClusterMetadata;
@@ -239,6 +241,9 @@ public class BootstrapAndReplace extends MultiStepOperation<Epoch>
                                      .filter(cfs -> Schema.instance.getUserKeyspaces().names().contains(cfs.keyspace.getName()))
                                      .forEach(cfs -> cfs.indexManager.executePreJoinTasksBlocking(true));
                         ClusterMetadataService.instance().commit(midReplace);
+
+                        // this node might have just bootstrapped; check if we should run repair immediately
+                        AutoRepairUtils.runRepairOnNewlyBootstrappedNodeIfEnabled();
                     }
                     else
                     {
@@ -440,6 +445,17 @@ public class BootstrapAndReplace extends MultiStepOperation<Epoch>
         states.add(Pair.create(ApplicationState.TOKENS, valueFactory.tokens(metadata.tokenMap.tokens(nodeId))));
         states.add(Pair.create(ApplicationState.STATUS_WITH_PORT, valueFactory.hibernate(true)));
         states.add(Pair.create(ApplicationState.STATUS, valueFactory.hibernate(true)));
+        Gossiper.instance.addLocalApplicationStates(states);
+    }
+
+    public static void gossipStateToNormal(ClusterMetadata metadata, NodeId nodeId)
+    {
+        List<Pair<ApplicationState, VersionedValue>> states = new ArrayList<>();
+        VersionedValue.VersionedValueFactory valueFactory = StorageService.instance.valueFactory;
+        Collection<Token> tokens = metadata.tokenMap.tokens(nodeId);
+        states.add(Pair.create(ApplicationState.TOKENS, valueFactory.tokens(tokens)));
+        states.add(Pair.create(ApplicationState.STATUS_WITH_PORT, valueFactory.normal(tokens)));
+        states.add(Pair.create(ApplicationState.STATUS, valueFactory.normal(tokens)));
         Gossiper.instance.addLocalApplicationStates(states);
     }
 

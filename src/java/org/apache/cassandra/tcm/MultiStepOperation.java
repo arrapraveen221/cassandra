@@ -33,6 +33,7 @@ import org.apache.cassandra.tcm.sequences.ProgressBarrier;
 import org.apache.cassandra.tcm.sequences.UnbootstrapAndLeave;
 import org.apache.cassandra.tcm.serialization.AsymmetricMetadataSerializer;
 import org.apache.cassandra.tcm.serialization.MetadataSerializer;
+import org.apache.cassandra.tcm.sequences.DropAccordTable;
 
 /**
  * Represents a multi-step process performed in order to transition the cluster to some state.
@@ -40,7 +41,7 @@ import org.apache.cassandra.tcm.serialization.MetadataSerializer;
  * For example, in order to join, the joining node has to execute the following steps:
  *   * PrepareJoin, which introduces node's tokens, but makes no changes to range ownership, and creates BootstrapAndJoin
  *     in-progress sequence
- *   * StartJoin, which adds the bootstrapping node to the write placements for the ranges it gains
+ *   * StartJoin, which adds the bootstrapping node to the write placements for  the ranges it gains
  *   * MidJoin, which adds the bootstrapping node to the read placements for the ranges it has gained, and removes
  *     owners of these ranges from the read placements
  *   * FinishJoin, which removes owners of the gained ranges from the write placements.
@@ -67,7 +68,8 @@ public abstract class MultiStepOperation<CONTEXT>
         LEAVE(UnbootstrapAndLeave.serializer),
         REMOVE(UnbootstrapAndLeave.serializer),
 
-        RECONFIGURE_CMS(ReconfigureCMS.serializer)
+        RECONFIGURE_CMS(ReconfigureCMS.serializer),
+        DROP_ACCORD_TABLE(DropAccordTable.serializer),
         ;
 
         public final AsymmetricMetadataSerializer<MultiStepOperation<?>, ? extends MultiStepOperation<?>> serializer;
@@ -126,7 +128,7 @@ public abstract class MultiStepOperation<CONTEXT>
 
     /**
      * Returns the {@link Transformation.Kind} of the next step due to be executed in the sequence. Used when executing
-     * a {@link Transformation} which is part of a sequence (specifically, subclasses of
+     * a {@link Transformation} which is part of a sequence (often, this is an implementation of
      * {@link org.apache.cassandra.tcm.transformations.ApplyPlacementDeltas}) to validate that it is being applied at
      * the correct point (i.e. that the type of the transform matches the expected next)
      * matches the If all steps

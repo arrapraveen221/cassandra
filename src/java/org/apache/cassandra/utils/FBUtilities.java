@@ -65,11 +65,13 @@ import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
-import com.vdurmont.semver4j.Semver;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import accord.utils.async.AsyncResult;
+import accord.utils.async.AsyncResults;
+import com.vdurmont.semver4j.Semver;
 import org.apache.cassandra.audit.IAuditLogger;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.DecoratedKey;
@@ -94,7 +96,7 @@ import org.apache.cassandra.utils.concurrent.FutureCombiner;
 import org.apache.cassandra.utils.concurrent.UncheckedInterruptedException;
 import org.objectweb.asm.Opcodes;
 
-import static org.apache.cassandra.config.CassandraRelevantProperties.CASSANDRA_AVAILABLE_PROCESSORS;
+import static org.apache.cassandra.config.CassandraRelevantProperties.BUILD_DATE;
 import static org.apache.cassandra.config.CassandraRelevantProperties.GIT_SHA;
 import static org.apache.cassandra.config.CassandraRelevantProperties.LINE_SEPARATOR;
 import static org.apache.cassandra.config.CassandraRelevantProperties.OS_NAME;
@@ -113,8 +115,7 @@ public class FBUtilities
     }
 
     private static final Logger logger = LoggerFactory.getLogger(FBUtilities.class);
-    public static final String UNKNOWN_RELEASE_VERSION = "Unknown";
-    public static final String UNKNOWN_GIT_SHA = "Unknown";
+    private static final String UNKNOWN = "Unknown";
 
     public static final BigInteger TWO = new BigInteger("2");
     private static final String DEFAULT_TRIGGER_DIR = "triggers";
@@ -131,13 +132,11 @@ public class FBUtilities
 
     private static volatile String previousReleaseVersionString;
 
-    private static int availableProcessors = CASSANDRA_AVAILABLE_PROCESSORS.getInt(DatabaseDescriptor.getAvailableProcessors());
-
     private static volatile Supplier<SystemInfo> systemInfoSupplier = Suppliers.memoize(SystemInfo::new);
 
     public static void setAvailableProcessors(int value)
     {
-        availableProcessors = value;
+        DatabaseDescriptor.setAvailableProcessors(value);
     }
 
     @VisibleForTesting
@@ -148,10 +147,7 @@ public class FBUtilities
 
     public static int getAvailableProcessors()
     {
-        if (availableProcessors > 0)
-            return availableProcessors;
-        else
-            return Runtime.getRuntime().availableProcessors();
+        return DatabaseDescriptor.getAvailableProcessors();
     }
 
     public static final int MAX_UNSIGNED_SHORT = 0xFFFF;
@@ -467,7 +463,7 @@ public class FBUtilities
     {
         Properties props = loadedProperties.get();
         if (props == null)
-            return RELEASE_VERSION.getString(UNKNOWN_RELEASE_VERSION);
+            return RELEASE_VERSION.getString(UNKNOWN);
         return props.getProperty("CassandraVersion");
     }
 
@@ -475,14 +471,22 @@ public class FBUtilities
     {
         Properties props = loadedProperties.get();
         if (props == null)
-            return GIT_SHA.getString(UNKNOWN_GIT_SHA);
-        return props.getProperty("GitSHA", UNKNOWN_GIT_SHA);
+            return GIT_SHA.getString(UNKNOWN);
+        return props.getProperty("GitSHA", UNKNOWN);
+    }
+
+    public static String getBuildDate()
+    {
+        Properties props = loadedProperties.get();
+        if (props == null)
+            return BUILD_DATE.getString(UNKNOWN);
+        return props.getProperty("BuildDate", UNKNOWN);
     }
 
     public static String getReleaseVersionMajor()
     {
         String releaseVersion = FBUtilities.getReleaseVersionString();
-        if (FBUtilities.UNKNOWN_RELEASE_VERSION.equals(releaseVersion))
+        if (FBUtilities.UNKNOWN.equals(releaseVersion))
         {
             throw new AssertionError("Release version is unknown");
         }
@@ -1160,18 +1164,24 @@ public class FBUtilities
             {
                 process.destroyForcibly();
                 logger.error("Command {} did not complete in {}, killed forcibly:\noutput:\n{}\n(truncated {} bytes)\nerror:\n{}\n(truncated {} bytes)",
-                            Arrays.toString(cmd), timeout, out.asString(), outOverflow, err.asString(), errOverflow);
+                             Arrays.toString(cmd), timeout, out.asString(), outOverflow, err.asString(), errOverflow);
                 throw new TimeoutException("Command " + Arrays.toString(cmd) + " did not complete in " + timeout);
             }
             int r = process.exitValue();
             if (r != 0)
             {
                 logger.error("Command {} failed with exit code {}:\noutput:\n{}\n(truncated {} bytes)\nerror:\n{}\n(truncated {} bytes)",
-                            Arrays.toString(cmd), r, out.asString(), outOverflow, err.asString(), errOverflow);
+                             Arrays.toString(cmd), r, out.asString(), outOverflow, err.asString(), errOverflow);
                 throw new IOException("Command " + Arrays.toString(cmd) + " failed with exit code " + r);
             }
             return out.asString();
         }
+    }
+
+    public static void updateChecksumShort(Checksum checksum, short v)
+    {
+        checksum.update((v >>> 8) & 0xFF);
+        checksum.update((v >>> 0) & 0xFF);
     }
 
     public static void updateChecksumInt(Checksum checksum, int v)
@@ -1180,6 +1190,12 @@ public class FBUtilities
         checksum.update((v >>> 16) & 0xFF);
         checksum.update((v >>> 8) & 0xFF);
         checksum.update((v >>> 0) & 0xFF);
+    }
+
+    public static void updateChecksumLong(Checksum checksum, long v)
+    {
+        updateChecksumInt(checksum, (int) (v >>> 32));
+        updateChecksumInt(checksum, (int) (v & 0xFFFFFFFFL));
     }
 
     /**
@@ -1426,5 +1442,34 @@ public class FBUtilities
     public static SystemInfo getSystemInfo()
     {
         return systemInfoSupplier.get();
+    }
+
+    public enum Order { LT, EQ, GT }
+    public static <T> Order compare(T a, T b, Comparator<T> comparator)
+    {
+        int rc = comparator.compare(a, b);
+        if (rc < 0) return Order.LT;
+        if (rc == 0) return Order.EQ;
+        return Order.GT;
+    }
+
+    public static <A, B> Order compare(A a, B b, AsymmetricOrdering<A, B> comparator)
+    {
+        int rc = comparator.compareAsymmetric(a, b);
+        if (rc < 0) return Order.LT;
+        if (rc == 0) return Order.EQ;
+        return Order.GT;
+    }
+
+    public static <T> AsyncResult<T> futureToAsyncResult(org.apache.cassandra.utils.concurrent.Future<T> future)
+    {
+        AsyncResult.Settable<T> adapter = AsyncResults.settable();
+        future.addCallback((value, failure) -> {
+           if (failure != null)
+               adapter.tryFailure(failure);
+           else
+               adapter.trySuccess(value);
+        });
+        return adapter;
     }
 }

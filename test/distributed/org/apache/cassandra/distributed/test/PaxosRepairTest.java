@@ -19,7 +19,12 @@
 package org.apache.cassandra.distributed.test;
 
 import java.net.InetSocketAddress;
-import java.util.*;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,21 +39,29 @@ import com.google.common.collect.Iterators;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.junit.Assert;
-import org.junit.Ignore;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import org.apache.cassandra.config.*;
+import org.apache.cassandra.config.CassandraRelevantProperties;
+import org.apache.cassandra.config.Config;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.statements.SelectStatement;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.ReadExecutionController;
+import org.apache.cassandra.db.ReadQuery;
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.partitions.PartitionIterator;
-import org.apache.cassandra.db.rows.*;
+import org.apache.cassandra.db.rows.Row;
+import org.apache.cassandra.db.rows.RowIterator;
 import org.apache.cassandra.distributed.Cluster;
+import org.apache.cassandra.distributed.Constants;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
 import org.apache.cassandra.distributed.api.Feature;
 import org.apache.cassandra.distributed.api.ICluster;
@@ -57,6 +70,8 @@ import org.apache.cassandra.distributed.api.IInstanceConfig;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.distributed.api.IMessageFilters;
 import org.apache.cassandra.gms.FailureDetector;
+import org.apache.cassandra.distributed.api.TokenSupplier;
+import org.apache.cassandra.distributed.shared.NetworkTopology;
 import org.apache.cassandra.locator.InetAddressAndPort;
 import org.apache.cassandra.repair.RepairParallelism;
 import org.apache.cassandra.repair.SharedContext;
@@ -66,7 +81,9 @@ import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.service.paxos.*;
+import org.apache.cassandra.service.paxos.Ballot;
+import org.apache.cassandra.service.paxos.Commit;
+import org.apache.cassandra.service.paxos.PaxosState;
 import org.apache.cassandra.service.paxos.cleanup.PaxosCleanup;
 import org.apache.cassandra.service.paxos.uncommitted.PaxosRows;
 import org.apache.cassandra.streaming.PreviewKind;
@@ -76,7 +93,12 @@ import org.apache.cassandra.tcm.membership.Directory;
 import org.apache.cassandra.tcm.membership.NodeVersion;
 import org.apache.cassandra.tcm.transformations.CustomTransformation;
 import org.apache.cassandra.tcm.transformations.ForceSnapshot;
-import org.apache.cassandra.utils.*;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.CassandraVersion;
+import org.apache.cassandra.utils.ExecutorUtils;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.TimeUUID;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.apache.cassandra.distributed.shared.AssertUtils.assertRows;
@@ -165,8 +187,9 @@ public class PaxosRepairTest extends TestBaseImpl
         options.put(RepairOption.FORCE_REPAIR_KEY, Boolean.toString(force));
         options.put(RepairOption.PREVIEW, PreviewKind.NONE.toString());
         options.put(RepairOption.IGNORE_UNREPLICATED_KS, Boolean.toString(false));
+        options.put(RepairOption.REPAIR_DATA_KEY, Boolean.toString(false));
         options.put(RepairOption.REPAIR_PAXOS_KEY, Boolean.toString(true));
-        options.put(RepairOption.PAXOS_ONLY_KEY, Boolean.toString(true));
+        options.put(RepairOption.REPAIR_ACCORD_KEY, Boolean.toString(false));
 
         cluster.get(1).runOnInstance(() -> {
             int cmd = StorageService.instance.repairAsync(keyspace, options);
@@ -304,16 +327,17 @@ public class PaxosRepairTest extends TestBaseImpl
     }
 
 
-    @Ignore
     @Test
     public void topologyChangePaxosTest() throws Throwable
     {
         // TODO: fails with vnode enabled
-        try (Cluster cluster = Cluster.build(4).withConfig(WITH_NETWORK).withoutVNodes().createWithoutStarting())
+        try (Cluster cluster = builder().withNodes(3)
+                                        .withTokenSupplier(TokenSupplier.evenlyDistributedTokens(4))
+                                        .withNodeIdTopology(NetworkTopology.singleDcNetworkTopology(4, "dc0", "rack0"))
+                                        .withConfig(WITH_NETWORK)
+                                        .withoutVNodes()
+                                        .start())
         {
-            for (int i=1; i<=3; i++)
-                cluster.get(i).startup();
-
             init(cluster);
             cluster.schemaChange("CREATE TABLE " + KEYSPACE + '.' + TABLE + " (pk int, ck int, v int, PRIMARY KEY (pk, ck))");
             cluster.coordinator(1).execute("INSERT INTO " + KEYSPACE + '.' + TABLE + " (pk, ck, v) VALUES (1, 1, 1) IF NOT EXISTS", ConsistencyLevel.QUORUM);
@@ -333,7 +357,11 @@ public class PaxosRepairTest extends TestBaseImpl
             cluster.filters().reset();
 
             // node 4 starting should repair paxos and inform the other nodes of its gossip state
-            cluster.get(4).startup();
+            IInstanceConfig config = cluster.newInstanceConfig()
+                                            .set("auto_bootstrap", true)
+                                            .set(Constants.KEY_DTEST_FULL_STARTUP, true);
+            IInvokableInstance node4 = cluster.bootstrap(config);
+            node4.startup();
             Assert.assertFalse(hasUncommittedQuorum(cluster, KEYSPACE, TABLE));
         }
     }

@@ -66,12 +66,14 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Interval;
 import org.apache.cassandra.utils.Overlaps;
 import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.TimeUUID;
 import org.apache.cassandra.utils.concurrent.Transactional;
 import org.mockito.Answers;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 
+import static org.apache.cassandra.io.sstable.format.SSTableReader.UNIQUE_IDENTIFIER_FACTORY;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -275,7 +277,7 @@ public class UnifiedCompactionStrategyTest
 
         IPartitioner partitioner = cfs.getPartitioner();
         DecoratedKey first = new BufferDecoratedKey(partitioner.getMinimumToken(), ByteBuffer.allocate(0));
-        DecoratedKey last = new BufferDecoratedKey(partitioner.getMaximumToken(), ByteBuffer.allocate(0));
+        DecoratedKey last = new BufferDecoratedKey(partitioner.getMaximumTokenForSplitting(), ByteBuffer.allocate(0));
 
         List<SSTableReader> sstables = new ArrayList<>();
         long dataSetSizeBytes = 0;
@@ -515,7 +517,7 @@ public class UnifiedCompactionStrategyTest
     {
         List<SSTableReader> mockSSTables = new ArrayList<>();
         Token min = partitioner.getMinimumToken();
-        Token max = partitioner.getMaximumToken();
+        Token max = partitioner.getMaximumTokenForSplitting();
         ByteBuffer bb = ByteBuffer.allocate(0);
         sstablesMap.forEach((size, num) -> {
             Token first = min.getPartitioner().split(min, max, 0.01);
@@ -1053,6 +1055,8 @@ public class UnifiedCompactionStrategyTest
         when(ret.getFirst()).thenReturn(first);
         when(ret.getLast()).thenReturn(last);
         when(ret.getInterval()).thenReturn(new Interval<>(first, last, ret));
+        when(ret.instanceId()).thenReturn(TimeUUID.Generator.nextTimeUUID(UNIQUE_IDENTIFIER_FACTORY));
+        when(ret.compareTo(any())).thenCallRealMethod();
         when(ret.isMarkedSuspect()).thenReturn(false);
         when(ret.isRepaired()).thenReturn(false);
         when(ret.getRepairedAt()).thenReturn(repairedAt);
@@ -1114,7 +1118,7 @@ public class UnifiedCompactionStrategyTest
 
     private Token boundary(int numSSTables, double i)
     {
-        return partitioner.split(partitioner.getMinimumToken(), partitioner.getMaximumToken(), i / numSSTables);
+        return partitioner.split(partitioner.getMinimumToken(), partitioner.getMaximumTokenForSplitting(), i / numSSTables);
     }
 
 }

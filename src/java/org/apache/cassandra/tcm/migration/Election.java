@@ -21,6 +21,7 @@ package org.apache.cassandra.tcm.migration;
 import java.io.IOException;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -28,7 +29,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.Sets;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -38,6 +38,8 @@ import org.apache.cassandra.schema.SchemaKeyspace;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.tcm.Startup;
 import org.apache.cassandra.tcm.membership.Directory;
+import org.apache.cassandra.tcm.membership.NodeId;
+import org.apache.cassandra.tcm.membership.NodeState;
 import org.apache.cassandra.tcm.ownership.TokenMap;
 import org.apache.cassandra.tcm.transformations.Register;
 import org.apache.cassandra.net.MessageDelivery;
@@ -50,12 +52,15 @@ import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 
+import static org.apache.cassandra.tcm.membership.NodeState.LEFT;
+
 /**
  * Election process establishes initial CMS leader, from which you can further evolve cluster metadata.
  */
 public class Election
 {
     private static final Logger logger = LoggerFactory.getLogger(Election.class);
+    private static final CMSInitializationRequest.Initiator MIGRATING = new CMSInitializationRequest.Initiator(null, null);
     private static final CMSInitializationRequest.Initiator MIGRATED = new CMSInitializationRequest.Initiator(null, null);
 
     private final AtomicReference<CMSInitializationRequest.Initiator> initiator = new AtomicReference<>();
@@ -127,14 +132,21 @@ public class Election
     private void finish(Set<InetAddressAndPort> sendTo)
     {
         CMSInitializationRequest.Initiator currentInitiator = initiator.get();
-        assert currentInitiator.initiator.equals(FBUtilities.getBroadcastAddressAndPort());
+        if (currentInitiator != null &&
+            Objects.equals(currentInitiator.endpoint, FBUtilities.getBroadcastAddressAndPort()) &&
+            initiator.compareAndSet(currentInitiator, MIGRATING))
+        {
+            Startup.initializeAsFirstCMSNode();
+            Register.maybeRegister();
+            SystemKeyspace.setLocalHostId(ClusterMetadata.current().myNodeId().toUUID());
 
-        Startup.initializeAsFirstCMSNode();
-        Register.maybeRegister();
-        SystemKeyspace.setLocalHostId(ClusterMetadata.current().myNodeId().toUUID());
-
-        updateInitiator(currentInitiator, MIGRATED);
-        MessageDelivery.fanoutAndWait(messaging, sendTo, Verb.TCM_NOTIFY_REQ, DistributedMetadataLogKeyspace.getLogState(Epoch.EMPTY, false));
+            updateInitiator(MIGRATING, MIGRATED);
+            MessageDelivery.fanoutAndWait(messaging, sendTo, Verb.TCM_NOTIFY_REQ, DistributedMetadataLogKeyspace.getLogState(Epoch.EMPTY, false));
+        }
+        else
+        {
+            throw new IllegalStateException("Can't finish migration, initiator="+currentInitiator);
+        }
     }
 
     private void abort(Set<InetAddressAndPort> sendTo)
@@ -164,6 +176,27 @@ public class Election
     {
         CMSInitializationRequest.Initiator initiator = initiator();
         return initiator != null && initiator != MIGRATED;
+    }
+
+    public void abortInitialization(String initiatorEp)
+    {
+        InetAddressAndPort expectedInitiator = InetAddressAndPort.getByNameUnchecked(initiatorEp);
+        CMSInitializationRequest.Initiator currentInitiator = initiator.get();
+        if (currentInitiator != null && Objects.equals(currentInitiator.endpoint, expectedInitiator) && initiator.compareAndSet(currentInitiator, null))
+        {
+            ClusterMetadata metadata = ClusterMetadata.current();
+            for (Map.Entry<NodeId, NodeState> entry : metadata.directory.states.entrySet())
+            {
+                NodeId nodeId = entry.getKey();
+                if (!Objects.equals(metadata.myNodeId(), nodeId) && entry.getValue() != LEFT)
+                    messaging.send(Message.out(Verb.TCM_ABORT_MIG, currentInitiator), metadata.directory.endpoint(nodeId));
+            }
+        }
+        else
+        {
+            throw new IllegalStateException("Current initiator [" + currentInitiator +"] does not match provided " + expectedInitiator +
+                                            " - run this command on a node where initialization has not yet been cleared, with the correct expected initiator");
+        }
     }
 
     public class PrepareHandler implements IVerbHandler<CMSInitializationRequest>
@@ -209,8 +242,11 @@ public class Election
         public void doVerb(Message<CMSInitializationRequest.Initiator> message) throws IOException
         {
             logger.info("Received election abort message {} from {}", message.payload, message.from());
-            if (!message.from().equals(initiator().initiator) || !updateInitiator(message.payload, null))
-                logger.error("Could not clear initiator - initiator is set to {}, abort message received from {}", initiator(), message.payload);
+            CMSInitializationRequest.Initiator remoteInitiator = message.payload;
+            if (initiator() == null)
+                logger.info("Initiator already cleared, ignoring abort message from {}: {}", message.from(), remoteInitiator);
+            else if (!remoteInitiator.endpoint.equals(initiator().endpoint) || !updateInitiator(remoteInitiator, null))
+                logger.error("Could not clear initiator - initiator is set to {}, abort message received from {}: {}", initiator(), message.from(), remoteInitiator);
         }
     }
 }

@@ -27,6 +27,15 @@ options {
     private final List<ErrorListener> listeners = new ArrayList<ErrorListener>();
     protected final List<ColumnIdentifier> bindVariables = new ArrayList<ColumnIdentifier>();
 
+    // enables parsing txn specific syntax when true
+    protected boolean isParsingTxn = false;
+    // tracks whether a txn has conditional updates
+    protected boolean isTxnConditional = false;
+
+    protected List<RowDataReference.Raw> references;
+
+    private Token statementBeginMarker;
+
     public static final Set<String> reservedTypeNames = new HashSet<String>()
     {{
         add("byte");
@@ -57,6 +66,19 @@ options {
         Json.Marker marker = new Json.Marker(bindVariables.size());
         bindVariables.add(name);
         return marker;
+    }
+
+    public RowDataReference.Raw newRowDataReference(Selectable.RawIdentifier tuple, Selectable.Raw selectable)
+    {
+        if (!isParsingTxn)
+            throw new SyntaxException("Cannot create a row data reference unless parsing a transaction");
+
+        if (references == null)
+            references = new ArrayList<>();
+
+        RowDataReference.Raw reference = RowDataReference.Raw.fromSelectable(tuple, selectable);
+        references.add(reference);
+        return reference;
     }
 
     public void addErrorListener(ErrorListener listener)
@@ -122,14 +144,24 @@ options {
         return res;
     }
 
-    public void addRawUpdate(List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations, ColumnIdentifier key, Operation.RawUpdate update)
+    public void addRawUpdate(UpdateStatement.OperationCollector collector, ColumnIdentifier key, Operation.RawUpdate update)
     {
-        for (Pair<ColumnIdentifier, Operation.RawUpdate> p : operations)
-        {
-            if (p.left.equals(key) && !p.right.isCompatibleWith(update))
-                addRecognitionError("Multiple incompatible setting of column " + key);
-        }
-        operations.add(Pair.create(key, update));
+        if (collector.conflictsWithExistingUpdate(key, update))
+            addRecognitionError("Multiple incompatible setting of column " + key);
+        if (collector.conflictsWithExistingSubstitution(key))
+            addRecognitionError("Normal and reference operations for " + key);
+
+        collector.addRawUpdate(key, update);
+    }
+
+    public void addRawReferenceOperation(UpdateStatement.OperationCollector collector, ColumnIdentifier key, ReferenceOperation.Raw update)
+    {
+        if (collector.conflictsWithExistingUpdate(key))
+            addRecognitionError("Multiple incompatible setting of column " + key);
+        if (collector.conflictsWithExistingSubstitution(key))
+            addRecognitionError("Normal and reference operations for " + key);
+
+        collector.addRawReferenceOperation(key, update);
     }
 
     public Set<Permission> filterPermissions(Set<Permission> permissions, IResource resource)
@@ -186,6 +218,19 @@ options {
     {
         // Do nothing.
     }
+
+    public Token stmtBegins()
+    {
+        statementBeginMarker = input.LT(1);
+        return statementBeginMarker;
+    }
+
+    public StatementSource stmtSrc()
+    {
+        StatementSource stmtSrc = StatementSource.create(statementBeginMarker);
+        statementBeginMarker = null;
+        return stmtSrc;
+    }
 }
 
 /** STATEMENTS **/
@@ -237,6 +282,8 @@ cqlStatement returns [CQLStatement.Raw stmt]
     | st43=dropIdentityStatement           { $stmt = st43; }
     | st44=listSuperUsersStatement         { $stmt = st44; }
     | st45=copyTableStatement              { $stmt = st45; }
+    | st46=batchTxnStatement               { $stmt = st46; }
+    | st47=letStatement                    { $stmt = st47; }
     ;
 
 /*
@@ -260,6 +307,7 @@ selectStatement returns [SelectStatement.RawStatement expr]
         List<Selectable.Raw> groups = new ArrayList<>();
         boolean allowFiltering = false;
         boolean isJson = false;
+        stmtBegins();
     }
     : K_SELECT
         // json is a valid column name. By consequence, we need to resolve the ambiguity for "json - json"
@@ -276,10 +324,39 @@ selectStatement returns [SelectStatement.RawStatement expr]
                                                                              groups,
                                                                              $sclause.isDistinct,
                                                                              allowFiltering,
-                                                                             isJson);
+                                                                             isJson,
+                                                                             null);
           WhereClause where = wclause == null ? WhereClause.empty() : wclause.build();
-          $expr = new SelectStatement.RawStatement(cf, params, $sclause.selectors, where, limit, perPartitionLimit);
+          $expr = new SelectStatement.RawStatement(cf, params, $sclause.selectors, where, limit, perPartitionLimit, stmtSrc());
       }
+    ;
+    
+/**
+ * ex. LET x = (SELECT * FROM <table> WHERE k=1 AND c=2)
+ * ex. LET y = (SELECT * FROM <table> WHERE k=1 LIMIT 1)
+ */
+letStatement returns [SelectStatement.RawStatement expr]
+    @init {
+        Term.Raw limit = null;
+    }
+    : K_LET txnVar=IDENT '='
+      '(' { stmtBegins(); } K_SELECT assignments=letSelectors K_FROM cf=columnFamilyName K_WHERE wclause=whereClause ( K_LIMIT rows=intValue { limit = rows; } )? ')'
+      {
+          SelectStatement.Parameters params = new SelectStatement.Parameters(Collections.emptyList(), Collections.emptyList(), false, false, false, $txnVar.text);
+          WhereClause where = wclause == null ? WhereClause.empty() : wclause.build();
+
+          $expr = new SelectStatement.RawStatement(cf, params, assignments, where, limit, null, stmtSrc());
+      }
+    ;
+    
+letSelectors returns [List<RawSelector> expr]
+    : t1=letSelector { $expr = new ArrayList<RawSelector>(); $expr.add(t1); } (',' tN=letSelector { $expr.add(tN); })*
+    | '\*' { $expr = Collections.<RawSelector>emptyList();}
+    ;
+    
+letSelector returns [RawSelector s]
+    @init{ ColumnIdentifier alias = null; }
+    : us=unaliasedSelector { $s = new RawSelector(us, alias); }
     ;
 
 selectClause returns [boolean isDistinct, List<RawSelector> selectors]
@@ -475,6 +552,9 @@ groupByClause[List<Selectable.Raw> groups]
  *
  */
 insertStatement returns [ModificationStatement.Parsed expr]
+    @init {
+        stmtBegins();
+    }
     : K_INSERT K_INTO cf=columnFamilyName
         ( st1=normalInsertStatement[cf] { $expr = st1; }
         | K_JSON st2=jsonInsertStatement[cf] { $expr = st2; })
@@ -489,12 +569,17 @@ normalInsertStatement [QualifiedName qn] returns [UpdateStatement.ParsedInsert e
     }
     : '(' c1=cident { columnNames.add(c1); }  ( ',' cn=cident { columnNames.add(cn); } )* ')'
       K_VALUES
-      '(' v1=term { values.add(v1); } ( ',' vn=term { values.add(vn); } )* ')'
+      '(' insertValue[values] ( ',' insertValue[values] )* ')'
       ( K_IF K_NOT K_EXISTS { ifNotExists = true; } )?
       ( usingClause[attrs] )?
       {
-          $expr = new UpdateStatement.ParsedInsert(qn, attrs, columnNames, values, ifNotExists);
+          $expr = new UpdateStatement.ParsedInsert(qn, attrs, columnNames, values, ifNotExists, stmtSrc(), isParsingTxn);
       }
+    ;
+
+insertValue[List<Term.Raw> values]
+    : t=term { values.add(t); }
+    | {isParsingTxn}? dr=rowDataReference { values.add(new ReferenceValue.Substitution.Raw(dr)); }
     ;
 
 jsonInsertStatement [QualifiedName qn] returns [UpdateStatement.ParsedInsertJson expr]
@@ -508,7 +593,7 @@ jsonInsertStatement [QualifiedName qn] returns [UpdateStatement.ParsedInsertJson
       ( K_IF K_NOT K_EXISTS { ifNotExists = true; } )?
       ( usingClause[attrs] )?
       {
-          $expr = new UpdateStatement.ParsedInsertJson(qn, attrs, val, defaultUnset, ifNotExists);
+          $expr = new UpdateStatement.ParsedInsertJson(qn, attrs, val, defaultUnset, ifNotExists, stmtSrc(), isParsingTxn);
       }
     ;
 
@@ -537,8 +622,9 @@ usingClauseObjective[Attributes.Raw attrs]
 updateStatement returns [UpdateStatement.ParsedUpdate expr]
     @init {
         Attributes.Raw attrs = new Attributes.Raw();
-        List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations = new ArrayList<>();
+        UpdateStatement.OperationCollector operations = new UpdateStatement.OperationCollector();
         boolean ifExists = false;
+        stmtBegins();
     }
     : K_UPDATE cf=columnFamilyName
       ( usingClause[attrs] )?
@@ -551,7 +637,9 @@ updateStatement returns [UpdateStatement.ParsedUpdate expr]
                                                    operations,
                                                    wclause.build(),
                                                    conditions == null ? Collections.<ColumnCondition.Raw>emptyList() : conditions,
-                                                   ifExists);
+                                                   ifExists,
+                                                   isParsingTxn,
+                                                   stmtSrc());
      }
     ;
 
@@ -572,6 +660,7 @@ deleteStatement returns [DeleteStatement.Parsed expr]
         Attributes.Raw attrs = new Attributes.Raw();
         List<Operation.RawDeletion> columnDeletions = Collections.emptyList();
         boolean ifExists = false;
+        stmtBegins();
     }
     : K_DELETE ( dels=deleteSelection { columnDeletions = dels; } )?
       K_FROM cf=columnFamilyName
@@ -584,7 +673,9 @@ deleteStatement returns [DeleteStatement.Parsed expr]
                                              columnDeletions,
                                              wclause.build(),
                                              conditions == null ? Collections.<ColumnCondition.Raw>emptyList() : conditions,
-                                             ifExists);
+                                             ifExists,
+                                             stmtSrc(),
+                                             isParsingTxn);
       }
     ;
 
@@ -648,6 +739,102 @@ batchStatementObjective returns [ModificationStatement.Parsed statement]
     : i=insertStatement  { $statement = i; }
     | u=updateStatement  { $statement = u; }
     | d=deleteStatement  { $statement = d; }
+    ;
+
+/**
+ * ex. conditional update returning pre-update values
+ *
+ * BEGIN TRANSACTION
+ *   LET row1 = (SELECT * FROM <table> WHERE k=1 AND c=2);
+ *   LET row2 = (SELECT * FROM <table> WHERE k=2 AND c=2);
+ *   SELECT row1.v, row2.v;
+ *   IF row1.v = 3 AND row2.v = 4 THEN
+ *     UPDATE <table> SET v = row1.v + 1 WHERE k = 1 AND c = 2;
+ *   END IF
+ * COMMIT TRANSACTION
+ *
+ * ex. read-only transaction
+ * 
+ * BEGIN TRANSACTION
+ *   SELECT * FROM <table> WHERE k=1 AND c=2;
+ * COMMIT TRANSACTION
+ *
+ * ex. write-only transaction
+ * 
+ * BEGIN TRANSACTION
+ *   INSERT INTO <table> (k, c, v) VALUES (0, 0, 1);
+ * COMMIT TRANSACTION
+ */
+batchTxnStatement returns [TransactionStatement.Parsed expr]
+    @init {
+        isParsingTxn = true;
+        List<SelectStatement.RawStatement> assignments = new ArrayList<>();
+        SelectStatement.RawStatement select = null;
+        List<RowDataReference.Raw> returning = null;
+        List<ModificationStatement.Parsed> updates = new ArrayList<>();
+    }
+    : K_BEGIN K_TRANSACTION
+      ( let=letStatement ';' { assignments.add(let); })*
+      ( ( (selectStatement) => s=selectStatement ';' { select = s; }) | ( K_SELECT drs=rowDataReferences ';' { returning = drs; }) )?
+      ( K_IF conditions=txnConditions K_THEN { isTxnConditional = true; } )?
+      ( upd=batchStatementObjective ';' { updates.add(upd); } )*
+      ( {!isTxnConditional}? (K_COMMIT K_TRANSACTION) | {isTxnConditional}? (K_END K_IF K_COMMIT K_TRANSACTION))
+    {
+        $expr = new TransactionStatement.Parsed(assignments, select, returning, updates, conditions, references);
+    }
+    ;
+    finally { isParsingTxn = false; }
+
+rowDataReferences returns [List<RowDataReference.Raw> refs]
+    : r1=rowDataReference { refs = new ArrayList<RowDataReference.Raw>(); refs.add(r1); } (',' rN=rowDataReference { refs.add(rN); })*
+    ;
+
+rowDataReference returns [RowDataReference.Raw rawRef]
+    @init { Selectable.RawIdentifier tuple = null; Selectable.Raw selectable = null; }
+    @after { $rawRef = newRowDataReference(tuple, selectable); }
+    : t=sident ('.' s=referenceSelection)? { tuple = t; selectable = s; }
+    ;
+
+referenceSelection returns [Selectable.Raw s]
+    : g=referenceSelectionWithoutField m=selectorModifier[g] {$s = m;}
+    ;
+
+referenceSelectionWithoutField returns [Selectable.Raw s]
+    @init { Selectable.Raw tmp = null; }
+    @after { $s = tmp; }
+    : sn=sident  { tmp=sn; }
+    | (selectionTypeHint)=> h=selectionTypeHint { tmp=h; }
+    | t=selectionTupleOrNestedSelector { tmp=t; }
+    | l=selectionList { tmp=l; }
+    | m=selectionMapOrSet { tmp=m; }
+    // UDTs are equivalent to maps from the syntax point of view, so the final decision will be done in Selectable.WithMapOrUdt
+    ;
+
+txnConditions returns [List<ConditionStatement.Raw> conditions]
+    @init { conditions = new ArrayList<ConditionStatement.Raw>(); }
+    : txnColumnCondition[conditions] ( K_AND txnColumnCondition[conditions] )*
+    ;
+
+txnConditionKind returns [ConditionStatement.Kind op]
+    : '='  { $op = ConditionStatement.Kind.EQ; }
+    | '<'  { $op = ConditionStatement.Kind.LT; }
+    | '<=' { $op = ConditionStatement.Kind.LTE; }
+    | '>'  { $op = ConditionStatement.Kind.GT; }
+    | '>=' { $op = ConditionStatement.Kind.GTE; }
+    | '!=' { $op = ConditionStatement.Kind.NEQ; }
+    ;
+
+txnColumnCondition[List<ConditionStatement.Raw> conditions]
+    : lhs=rowDataReference
+      ( 
+        K_IS 
+        (
+            K_NOT K_NULL { conditions.add(new ConditionStatement.Raw(lhs, ConditionStatement.Kind.IS_NOT_NULL, null)); }
+            | K_NULL { conditions.add(new ConditionStatement.Raw(lhs, ConditionStatement.Kind.IS_NULL, null)); }
+        )
+        | (txnConditionKind term)=> op=txnConditionKind t=term { conditions.add(new ConditionStatement.Raw(lhs, op, t)); }
+      )
+    | lhs=term op=txnConditionKind rhs=rowDataReference { conditions.add(new ConditionStatement.Raw(lhs, op, rhs)); }
     ;
 
 createAggregateStatement returns [CreateAggregateStatement.Raw stmt]
@@ -780,8 +967,8 @@ tableDefinition[CreateTableStatement.Raw stmt]
     ;
 
 tableColumns[CreateTableStatement.Raw stmt]
-    @init { boolean isStatic = false; }
-    : k=ident v=comparatorType (K_STATIC { isStatic = true; })? (mask=columnMask)? (constraints=columnConstraints)? { $stmt.addColumn(k, v, isStatic, mask, constraints); }
+    @init { boolean isStatic = false; boolean isNotNull = false; }
+    : k=ident v=comparatorType (K_STATIC { isStatic = true; })? (K_NOT K_NULL { isNotNull = true; })? (mask=columnMask)? (constraints=columnConstraints)? { $stmt.addColumn(k, v, isStatic, isNotNull, mask, constraints); }
         (K_PRIMARY K_KEY { $stmt.setPartitionKeyColumn(k); })?
     | K_PRIMARY K_KEY '(' tablePartitionKey[stmt] (',' c=ident { $stmt.markClusteringColumn(c); } )* ')'
     ;
@@ -795,9 +982,30 @@ columnConstraints returns [ColumnConstraints.Raw constraints]
     ;
 
 columnConstraint returns [ColumnConstraint columnConstraint]
-    : funcName=ident '(' k=ident ')' op=relationType t=value { $columnConstraint = new FunctionColumnConstraint.Raw(funcName, k, op, t.getText()).prepare(); }
-    | funcName=ident '(' k=ident ')' { $columnConstraint = new UnaryFunctionColumnConstraint.Raw(funcName, k).prepare(); }
-    | k=ident op=relationType t=value { $columnConstraint = new ScalarColumnConstraint.Raw(k, op, t.getText()).prepare(); }
+    @init { List<String> arguments = new ArrayList<>(); }
+    : K_NOT K_NULL
+    {
+        $columnConstraint = new UnaryFunctionColumnConstraint.Raw("NOT_NULL").prepare();
+    }
+    | funcName=ident columnConstraintsArguments[arguments] (op=relationType t=value)?
+    {
+        if (op != null && t != null)
+        {
+            $columnConstraint = new FunctionColumnConstraint.Raw(funcName, arguments, op, t.getText()).prepare();
+        }
+        else
+        {
+            $columnConstraint = new UnaryFunctionColumnConstraint.Raw(funcName, arguments).prepare();
+        }
+    }
+    | k=ident op=relationType t=value
+    {
+        $columnConstraint = new ScalarColumnConstraint.Raw(k, op, t.getText()).prepare();
+    }
+    | funcName=ident
+    {
+         $columnConstraint = new UnaryFunctionColumnConstraint.Raw(funcName).prepare();
+    }
     ;
 
 columnMask returns [ColumnMask.Raw mask]
@@ -808,6 +1016,12 @@ columnMask returns [ColumnMask.Raw mask]
 
 columnMaskArguments[List<Term.Raw> arguments]
     : '('  ')' | '(' c=term { arguments.add(c); } (',' cn=term { arguments.add(cn); })* ')'
+    ;
+
+columnConstraintsArguments[List<String> arguments]
+    : '('  ')'
+    | '(' c=term { try { arguments.add(c.toString()); } catch (Throwable t) { throw new SyntaxException("Constraint function parameters need to be strings."); }; } (',' cn=term { try { arguments.add(cn.toString()); } catch (Throwable t) { throw new SyntaxException("Constraint function parameters need to be strings."); }; })* ')'
+    | '(' ci=ident { throw new SyntaxException("Constraint function parameters need to be strings."); } (',' cni=ident)* ')'
     ;
 
 tablePartitionKey[CreateTableStatement.Raw stmt]
@@ -988,14 +1202,14 @@ alterTableStatement returns [AlterTableStatement.Raw stmt]
 
       | K_ALTER ( K_IF K_EXISTS { $stmt.ifColumnExists(true); } )? id=cident
               ( mask=columnMask { $stmt.mask(id, mask); }
+              | constraints=columnConstraints { $stmt.constraint(id, constraints); }
               | K_DROP K_MASKED { $stmt.mask(id, null); }
-              | K_DROP K_CHECK { $stmt.dropConstraints(id); }
-              | (constraints=columnConstraints) { $stmt.alterConstraints(id, constraints); })
+              | K_DROP K_CHECK { $stmt.constraint(id, null); })
 
       | K_ADD ( K_IF K_NOT K_EXISTS { $stmt.ifColumnNotExists(true); } )?
-              (        id=ident  v=comparatorType  b=isStaticColumn (m=columnMask)? { $stmt.add(id,  v,  b, m);  }
-               | ('('  id1=ident v1=comparatorType b1=isStaticColumn (m1=columnMask)? { $stmt.add(id1, v1, b1, m1); }
-                 ( ',' idn=ident vn=comparatorType bn=isStaticColumn (mn=columnMask)? { $stmt.add(idn, vn, bn, mn); mn=null; } )* ')') )
+              (        id=ident  v=comparatorType  b=isStaticColumn (m=columnMask)? (c=columnConstraints)? { $stmt.add(id,  v,  b, m, c);  }
+               | ('('  id1=ident v1=comparatorType b1=isStaticColumn (m1=columnMask)? (c=columnConstraints)? { $stmt.add(id1, v1, b1, m1, c); }
+                 ( ',' idn=ident vn=comparatorType bn=isStaticColumn (mn=columnMask)? (c=columnConstraints)? { $stmt.add(idn, vn, bn, mn, c); mn=null; c=null;} )* ')') )
 
       | K_DROP ( K_IF K_EXISTS { $stmt.ifColumnExists(true); } )?
                (       id=ident { $stmt.drop(id);  }
@@ -1727,18 +1941,18 @@ simpleTerm returns [Term.Raw term]
     | K_CAST '(' t=simpleTerm K_AS n=native_type ')' { $term = FunctionCall.Raw.newCast(t, n); }
     ;
 
-columnOperation[List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations]
+columnOperation[UpdateStatement.OperationCollector operations]
     : key=cident columnOperationDifferentiator[operations, key]
     ;
 
-columnOperationDifferentiator[List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations, ColumnIdentifier key]
+columnOperationDifferentiator[UpdateStatement.OperationCollector operations, ColumnIdentifier key]
     : '=' normalColumnOperation[operations, key]
     | shorthandColumnOperation[operations, key]
     | '[' k=term ']' collectionColumnOperation[operations, key, k]
     | '.' field=fident udtColumnOperation[operations, key, field]
     ;
 
-normalColumnOperation[List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations, ColumnIdentifier key]
+normalColumnOperation[UpdateStatement.OperationCollector operations, ColumnIdentifier key]
     : t=term ('+' c=cident )?
       {
           if (c == null)
@@ -1766,27 +1980,56 @@ normalColumnOperation[List<Pair<ColumnIdentifier, Operation.RawUpdate>> operatio
               addRecognitionError("Only expressions of the form X = X " + ($i.text.charAt(0) == '-' ? '-' : '+') + " <value> are supported.");
           addRawUpdate(operations, key, new Operation.Addition(Constants.Literal.integer($i.text)));
       }
+     | {isParsingTxn}? r=rowDataReference
+       {
+           addRawReferenceOperation(operations, key, new ReferenceOperation.Raw(new Operation.SetValue(r), key, new ReferenceValue.Substitution.Raw(r)));
+       }
     ;
 
-shorthandColumnOperation[List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations, ColumnIdentifier key]
-    : sig=('+=' | '-=') t=term
-      {
-          addRawUpdate(operations, key, $sig.text.equals("+=") ? new Operation.Addition(t) : new Operation.Substraction(t));
-      }
+shorthandColumnOperation[UpdateStatement.OperationCollector operations, ColumnIdentifier key]
+    : sig=('+=' | '-=')
+      (
+          t=term
+          {
+              addRawUpdate(operations, key, $sig.text.equals("+=") ? new Operation.Addition(t) : new Operation.Substraction(t));
+          }
+          | {isParsingTxn}? dr=rowDataReference
+            {
+                ReferenceValue.Raw right = new ReferenceValue.Substitution.Raw(dr);
+                Operation.RawUpdate operation = $sig.text.equals("+=") ? new Operation.Addition(dr) : new Operation.Substraction(dr);
+                addRawReferenceOperation(operations, key, new ReferenceOperation.Raw(operation, key, right));
+            }
+      )
     ;
 
-collectionColumnOperation[List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations, ColumnIdentifier key, Term.Raw k]
-    : '=' t=term
-      {
-          addRawUpdate(operations, key, new Operation.SetElement(k, t));
-      }
+collectionColumnOperation[UpdateStatement.OperationCollector operations, ColumnIdentifier key, Term.Raw k]
+    : '='
+      (
+          t=term
+          {
+              addRawUpdate(operations, key, new Operation.SetElement(k, t));
+          }
+          | {isParsingTxn}? dr=rowDataReference
+            {
+                ReferenceValue.Raw right = new ReferenceValue.Substitution.Raw(dr);
+                addRawReferenceOperation(operations, key, new ReferenceOperation.Raw(new Operation.SetElement(k, dr), key, right));
+            }
+      )
     ;
 
-udtColumnOperation[List<Pair<ColumnIdentifier, Operation.RawUpdate>> operations, ColumnIdentifier key, FieldIdentifier field]
-    : '=' t=term
-      {
-          addRawUpdate(operations, key, new Operation.SetField(field, t));
-      }
+udtColumnOperation[UpdateStatement.OperationCollector operations, ColumnIdentifier key, FieldIdentifier field]
+    : '='
+      (
+          t=term
+          {
+              addRawUpdate(operations, key, new Operation.SetField(field, t));
+          }
+          | {isParsingTxn}? dr=rowDataReference
+            {
+                ReferenceValue.Raw right = new ReferenceValue.Substitution.Raw(dr);
+                addRawReferenceOperation(operations, key, new ReferenceOperation.Raw(new Operation.SetField(field, dr), key, right));
+            }
+      )
     ;
 
 columnCondition returns [ColumnCondition.Raw condition]
@@ -2094,5 +2337,10 @@ basic_unreserved_keyword returns [String str]
         | K_BETWEEN
         | K_CHECK
         | K_INDEXES
+        | K_COMMIT
+        | K_END
+        | K_LET
+        | K_THEN
+        | K_TRANSACTION
         ) { $str = $k.text; }
     ;

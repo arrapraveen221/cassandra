@@ -53,6 +53,7 @@ import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.StorageService;
+import org.apache.cassandra.service.accord.AccordService;
 import org.apache.cassandra.tcm.log.LocalLog;
 import org.apache.cassandra.tcm.log.LogStorage;
 import org.apache.cassandra.tcm.log.SystemKeyspaceStorage;
@@ -74,6 +75,8 @@ import static org.apache.cassandra.tcm.ClusterMetadataService.State.LOCAL;
 import static org.apache.cassandra.tcm.compatibility.GossipHelper.emptyWithSchemaFromSystemTables;
 import static org.apache.cassandra.tcm.compatibility.GossipHelper.fromEndpointStates;
 import static org.apache.cassandra.tcm.membership.NodeState.JOINED;
+import static org.apache.cassandra.tcm.membership.NodeState.LEFT;
+import static org.apache.cassandra.tcm.membership.NodeState.REGISTERED;
 import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
 
  /**
@@ -245,7 +248,7 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
             else
             {
                 CMSInitializationRequest.Initiator initiator = Election.instance.initiator();
-                candidates = Discovery.instance.discoverOnce(initiator == null ? null : initiator.initiator);
+                candidates = Discovery.instance.discoverOnce(initiator == null ? null : initiator.endpoint);
             }
             Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
         }
@@ -313,18 +316,26 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
         logger.debug("Created initial ClusterMetadata {}", initial);
         ClusterMetadataService.instance().setFromGossip(initial);
         Gossiper.instance.clearUnsafe();
-        if (switchIp != null)
-        {
-            // quarantine the old ip to make sure it doesn't get re-added via gossip
-            InetAddressAndPort removeEp = switchIp;
-            Gossiper.runInGossipStageBlocking(() -> Gossiper.instance.removeEndpoint(removeEp));
-        }
+
+        // find any endpoints that were ignored on upgrade and make sure they don't get re-added in gossip
+        InetAddressAndPort removeEp = switchIp;
+        Gossiper.runInGossipStageBlocking(() -> {
+            if (removeEp != null)
+                Gossiper.instance.removeEndpoint(removeEp);
+            for (InetAddressAndPort ep : epStates.keySet())
+            {
+                if (initial.directory.peerId(ep) == null)
+                    Gossiper.instance.removeEndpoint(ep); // just quarantines the ep - endpoint states should be empty
+                                                          // here (this is run before Gossiper is started)
+            }
+        });
+
         Gossiper.instance.maybeInitializeLocalState(SystemKeyspace.incrementAndGetGeneration());
         for (Map.Entry<NodeId, NodeState> entry : initial.directory.states.entrySet())
         {
             InetAddressAndPort ep = initial.directory.addresses.get(entry.getKey()).broadcastAddress;
-            if (entry.getValue() != NodeState.LEFT)
-                Gossiper.instance.mergeNodeToGossip(entry.getKey(), initial);
+            if (entry.getValue() != LEFT)
+                Gossiper.instance.mergeNodeToGossip(entry.getKey(), initial, Gossiper.isHibernate(epStates.get(ep)));
             else
                 Gossiper.runInGossipStageBlocking(() -> Gossiper.instance.endpointStateMap.put(ep, epStates.get(ep)));
         }
@@ -411,7 +422,11 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
         InProgressSequences.finishInProgressSequences(self, true);
         metadata = ClusterMetadata.current();
 
-        switch (metadata.directory.peerState(self))
+        NodeState startingstate = metadata.directory.peerState(self);
+        if (startingstate != REGISTERED && startingstate != LEFT)
+            AccordService.startup(self);
+
+        switch (startingstate)
         {
             case REGISTERED:
             case LEFT:
@@ -419,6 +434,10 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
                     ReconfigureCMS.maybeReconfigureCMS(metadata, DatabaseDescriptor.getReplaceAddress());
 
                 ClusterMetadataService.instance().commit(initialTransformation.get());
+                // When Accord starts up it needs to check for any historic epochs that it needs to know about (in order
+                // to handle pending transactions), in order to know what nodes to check with it needs to know what the
+                // settled placement is (so it knows what peers to reach out to).
+                AccordService.startup(self);
                 InProgressSequences.finishInProgressSequences(self, true); // potentially finish the MSO committed above
                 metadata = ClusterMetadata.current();
 
@@ -543,15 +562,17 @@ import static org.apache.cassandra.utils.FBUtilities.getBroadcastAddressAndPort;
             }
             if (seeds.isEmpty())
                 throw new IllegalArgumentException("Can not initialize CMS without any seeds");
-
             boolean hasAnyEpoch = SystemKeyspaceStorage.hasAnyEpoch();
+
             // For CCM and local dev clusters
             boolean isOnlySeed = DatabaseDescriptor.getSeeds().size() == 1
                                  && DatabaseDescriptor.getSeeds().contains(FBUtilities.getBroadcastAddressAndPort())
                                  && DatabaseDescriptor.getSeeds().iterator().next().getAddress().isLoopbackAddress();
             boolean hasBootedBefore = SystemKeyspace.getLocalHostId() != null;
             logger.info("hasAnyEpoch = {}, hasBootedBefore = {}", hasAnyEpoch, hasBootedBefore);
-            if (!hasAnyEpoch && hasBootedBefore)
+            if (!hasAnyEpoch && hasBootedBefore &&
+                // Atomic long processor currently does not support upgrades
+                !CassandraRelevantProperties.TCM_USE_ATOMIC_LONG_PROCESSOR.getBoolean())
                 return UPGRADE;
             else if (hasAnyEpoch)
                 return NORMAL;

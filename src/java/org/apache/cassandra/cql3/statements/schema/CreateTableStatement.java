@@ -17,13 +17,20 @@
  */
 package org.apache.cassandra.cql3.statements.schema;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
-
 import javax.annotation.Nullable;
 
 import com.google.common.collect.ImmutableSet;
-
 import org.apache.commons.lang3.StringUtils;
 
 import org.apache.cassandra.audit.AuditLogContext;
@@ -31,24 +38,48 @@ import org.apache.cassandra.audit.AuditLogEntryType;
 import org.apache.cassandra.auth.DataResource;
 import org.apache.cassandra.auth.IResource;
 import org.apache.cassandra.auth.Permission;
-import org.apache.cassandra.cql3.*;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.constraints.ColumnConstraint;
 import org.apache.cassandra.cql3.constraints.ColumnConstraints;
+import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.cql3.CQLFragmentParser;
+import org.apache.cassandra.cql3.CQLStatement;
+import org.apache.cassandra.cql3.ColumnIdentifier;
+import org.apache.cassandra.cql3.CqlParser;
+import org.apache.cassandra.cql3.QualifiedName;
+import org.apache.cassandra.cql3.constraints.NotNullConstraint;
+import org.apache.cassandra.cql3.constraints.UnaryFunctionColumnConstraint;
 import org.apache.cassandra.cql3.functions.masking.ColumnMask;
 import org.apache.cassandra.db.guardrails.Guardrails;
-import org.apache.cassandra.db.marshal.*;
+import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.BytesType;
+import org.apache.cassandra.db.marshal.CounterColumnType;
+import org.apache.cassandra.db.marshal.EmptyType;
+import org.apache.cassandra.db.marshal.ReversedType;
+import org.apache.cassandra.db.marshal.UTF8Type;
+import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.exceptions.AlreadyExistsException;
-import org.apache.cassandra.schema.*;
+import org.apache.cassandra.schema.KeyspaceMetadata;
+import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
+import org.apache.cassandra.schema.MemtableParams;
+import org.apache.cassandra.schema.Schema;
+import org.apache.cassandra.schema.SchemaConstants;
+import org.apache.cassandra.schema.TableId;
+import org.apache.cassandra.schema.TableMetadata;
+import org.apache.cassandra.schema.TableParams;
+import org.apache.cassandra.schema.Types;
+import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.service.ClientState;
-import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
+import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.transport.Event.SchemaChange;
 import org.apache.cassandra.transport.Event.SchemaChange.Change;
 import org.apache.cassandra.transport.Event.SchemaChange.Target;
 
-import static java.util.Comparator.comparing;
-
 import static com.google.common.collect.Iterables.concat;
+import static java.lang.String.format;
+import static java.util.Comparator.comparing;
 
 public final class CreateTableStatement extends AlterSchemaStatement
 {
@@ -145,6 +176,16 @@ public final class CreateTableStatement extends AlterSchemaStatement
         if (!table.params.compression.isEnabled())
             Guardrails.uncompressedTablesEnabled.ensureEnabled(state);
 
+        if (table.params.transactionalMode.accordIsEnabled && SchemaConstants.isSystemKeyspace(keyspaceName))
+            throw ire("Cannot enable accord on system tables (%s.%s)", keyspaceName, tableName);
+
+        if (table.params.transactionalMode.accordIsEnabled && !DatabaseDescriptor.getAccordTransactionsEnabled())
+            throw ire(format("Cannot create table %s.%s with transactional mode %s with accord.enabled set to false",
+                             keyspaceName, tableName, table.params.transactionalMode));
+
+        if (table.params.transactionalMigrationFrom.isMigrating())
+            throw ire("Cannot set transactional migration on new tables (%s.%s), %s", keyspaceName, tableName, table.params.transactionalMigrationFrom);
+
         return schema.withAddedOrUpdated(keyspace.withSwapped(keyspace.tables.with(table)));
     }
 
@@ -177,7 +218,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
         if (useCompactStorage)
             Guardrails.compactTablesEnabled.ensureEnabled(state);
 
-        validateDefaultTimeToLive(attrs.asNewTableParams());
+        validateDefaultTimeToLive(attrs.asNewTableParams(keyspaceName));
 
         rawColumns.forEach((name, raw) -> raw.validate(state, name));
     }
@@ -212,7 +253,7 @@ public final class CreateTableStatement extends AlterSchemaStatement
     public TableMetadata.Builder builder(Types types, UserFunctions functions)
     {
         attrs.validate();
-        TableParams params = attrs.asNewTableParams();
+        TableParams params = attrs.asNewTableParams(keyspaceName);
 
         // use a TreeMap to preserve ordering across JDK versions (see CASSANDRA-9492) - important for stable unit tests
         Map<ColumnIdentifier, ColumnProperties> columns = new TreeMap<>(comparing(o -> o.bytes));
@@ -348,16 +389,14 @@ public final class CreateTableStatement extends AlterSchemaStatement
         {
             ColumnProperties properties = partitionKeyColumnProperties.get(i);
             ColumnIdentifier columnIdentifier = partitionKeyColumns.get(i);
-            builder.addPartitionKeyColumn(columnIdentifier, properties.type, properties.mask);
-            builder.getColumn(columnIdentifier).setColumnConstraints(columnConstraints.get(columnIdentifier));
+            builder.addPartitionKeyColumn(columnIdentifier, properties.type, properties.mask, columnConstraints.get(columnIdentifier));
         }
 
         for (int i = 0; i < clusteringColumns.size(); i++)
         {
             ColumnProperties properties = clusteringColumnProperties.get(i);
             ColumnIdentifier columnIdentifier = clusteringColumns.get(i);
-            builder.addClusteringColumn(columnIdentifier, properties.type, properties.mask);
-            builder.getColumn(columnIdentifier).setColumnConstraints(columnConstraints.get(columnIdentifier));
+            builder.addClusteringColumn(columnIdentifier, properties.type, properties.mask, columnConstraints.get(columnIdentifier));
         }
 
         if (useCompactStorage)
@@ -368,13 +407,11 @@ public final class CreateTableStatement extends AlterSchemaStatement
         {
             columns.forEach((column, properties) -> {
                 if (staticColumns.contains(column))
-                    builder.addStaticColumn(column, properties.type, properties.mask);
+                    builder.addStaticColumn(column, properties.type, properties.mask, columnConstraints.get(column));
                 else
-                    builder.addRegularColumn(column, properties.type, properties.mask);
+                    builder.addRegularColumn(column, properties.type, properties.mask, columnConstraints.get(column));
             });
         }
-
-        columns.keySet().forEach(id -> builder.getColumn(id).setColumnConstraints(columnConstraints.get(id)));
 
         return builder;
     }
@@ -572,17 +609,33 @@ public final class CreateTableStatement extends AlterSchemaStatement
             return name.getName();
         }
 
-        public void addColumn(ColumnIdentifier column, CQL3Type.Raw type, boolean isStatic, ColumnMask.Raw mask, ColumnConstraints.Raw constraints)
+        public void addColumn(ColumnIdentifier column, CQL3Type.Raw type, boolean isStatic, boolean isNotNull, ColumnMask.Raw mask, ColumnConstraints.Raw constraints)
         {
             if (null != rawColumns.put(column, new ColumnProperties.Raw(type, mask)))
                 throw ire("Duplicate column '%s' declaration for table '%s'", column, name);
 
             if (isStatic)
                 staticColumns.add(column);
-            if (null == constraints)
-                columnConstraints.put(column, ColumnConstraints.NO_OP);
-            else
-                columnConstraints.put(column, constraints.prepare());
+
+            ColumnConstraints preparedConstraints = constraints == null ? ColumnConstraints.NO_OP : constraints.prepare(column);
+
+            if (isNotNull)
+            {
+                 if (preparedConstraints.containsNotNullConstraint())
+                     throw ire("Duplicate definition of NOT NULL constraint");
+
+                List<ColumnConstraint<?>> checkConstraints = new ArrayList<>(preparedConstraints.getConstraints());
+                checkConstraints.add(new UnaryFunctionColumnConstraint(new NotNullConstraint()));
+                preparedConstraints = new ColumnConstraints(checkConstraints);
+                preparedConstraints.setColumnName(column);
+            }
+
+            columnConstraints.put(column, preparedConstraints);
+        }
+
+        public void addColumn(ColumnIdentifier column, CQL3Type.Raw type, boolean isStatic, ColumnMask.Raw mask, ColumnConstraints.Raw constraints)
+        {
+            addColumn(column, type, isStatic, false, mask, constraints);
         }
 
         public void setCompactStorage()

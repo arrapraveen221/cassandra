@@ -50,6 +50,11 @@ public interface Conditional extends Expression
         return v.visit(this);
     }
 
+    default String debugCQL()
+    {
+        return visit(StandardVisitors.DEBUG).toCQL();
+    }
+
     default List<Conditional> simplify()
     {
         return Collections.singletonList(this);
@@ -71,6 +76,21 @@ public interface Conditional extends Expression
             Inequality(String value)
             {
                 this.value = value;
+            }
+
+            public boolean test(AbstractType<?> type, ByteBuffer a, ByteBuffer b)
+            {
+                int rc = type.compare(a, b);
+                switch (this)
+                {
+                    case EQUAL: return rc == 0;
+                    case NOT_EQUAL: return rc != 0;
+                    case GREATER_THAN: return rc > 0;
+                    case GREATER_THAN_EQ: return rc >=0;
+                    case LESS_THAN: return rc < 0;
+                    case LESS_THAN_EQ: return rc <=0;
+                    default: throw new UnsupportedOperationException(this.name());
+                }
             }
         }
 
@@ -433,7 +453,7 @@ public interface Conditional extends Expression
             return sub.isEmpty();
         }
 
-        private Builder add(Conditional conditional)
+        public Builder add(Conditional conditional)
         {
             sub.add(conditional);
             return this;

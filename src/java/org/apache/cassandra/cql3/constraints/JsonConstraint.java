@@ -21,7 +21,6 @@ package org.apache.cassandra.cql3.constraints;
 import java.nio.ByteBuffer;
 import java.util.List;
 
-import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.Operator;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.AsciiType;
@@ -31,20 +30,15 @@ import org.apache.cassandra.utils.JsonUtils;
 
 import static java.lang.String.format;
 
-public class JsonConstraint extends ConstraintFunction
+public class JsonConstraint extends UnaryConstraintFunction
 {
     private static final List<AbstractType<?>> SUPPORTED_TYPES = List.of(UTF8Type.instance, AsciiType.instance);
 
     public static final String FUNCTION_NAME = "JSON";
 
-    public JsonConstraint(ColumnIdentifier columnName)
+    public JsonConstraint(List<String> args)
     {
-        this(columnName, FUNCTION_NAME);
-    }
-
-    public JsonConstraint(ColumnIdentifier columnName, String name)
-    {
-        super(columnName, name);
+        super(FUNCTION_NAME, args);
     }
 
     @Override
@@ -57,7 +51,7 @@ public class JsonConstraint extends ConstraintFunction
         catch (MarshalException ex)
         {
             throw new ConstraintViolationException(format("Value for column '%s' violated %s constraint as it is not a valid JSON.",
-                                                          columnName.toCQLString(),
+                                                          columnName,
                                                           name));
         }
     }

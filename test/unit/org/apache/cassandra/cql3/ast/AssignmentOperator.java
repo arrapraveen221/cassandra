@@ -53,30 +53,34 @@ public class AssignmentOperator implements Expression
         this.right = right;
     }
 
-    public static EnumSet<Kind> supportsOperators(AbstractType<?> type)
+    public static EnumSet<Kind> supportsOperators(AbstractType<?> type, boolean isTransaction)
     {
         type = type.unwrap();
         EnumSet<Kind> result = EnumSet.noneOf(Kind.class);
+        if (type instanceof CollectionType && type.isMultiCell())
+        {
+            if (type instanceof SetType)
+                return EnumSet.of(Kind.ADD, Kind.SUBTRACT);
+            if (type instanceof ListType)
+                return isTransaction
+                       ? EnumSet.of(Kind.ADD, Kind.SUBTRACT)
+                       : EnumSet.of(Kind.ADD);
+            if (type instanceof MapType)
+            {
+                //TODO (coverage): include SUBTRACT support
+                // map supports subtract, but not map - map; only map - set!
+                // since this is annoying to support, for now dropping -
+                return EnumSet.of(Kind.ADD);
+            }
+            throw new AssertionError("Unexpected collection type: " + type);
+        }
+        if (!isTransaction)
+            return result; // only multi-cell collections can be updated outside of transactions
         for (Operator.Kind supported : Operator.supportsOperators(type))
         {
             Kind kind = toKind(supported);
             if (kind != null)
                 result.add(kind);
-        }
-        if (result.isEmpty())
-        {
-            if (type instanceof CollectionType && type.isMultiCell())
-            {
-                if (type instanceof SetType || type instanceof ListType)
-                    return EnumSet.of(Kind.ADD, Kind.SUBTRACT);
-                if (type instanceof MapType)
-                {
-                    // map supports subtract, but not map - map; only map - set!
-                    // since this is annoying to support, for now dropping -
-                    return EnumSet.of(Kind.ADD);
-                }
-                throw new AssertionError("Unexpected collection type: " + type);
-            }
         }
         return result;
     }
@@ -118,5 +122,11 @@ public class AssignmentOperator implements Expression
         var r = right.visit(v);
         if (r == right) return this;
         return new AssignmentOperator(kind, r);
+    }
+
+    @Override
+    public String toString()
+    {
+        return debugCQL();
     }
 }

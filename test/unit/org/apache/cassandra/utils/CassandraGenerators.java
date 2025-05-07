@@ -28,6 +28,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -37,6 +38,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -48,24 +50,43 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+
+import org.apache.cassandra.db.compaction.LeveledManifest;
+import org.apache.cassandra.schema.*;
+import org.apache.cassandra.service.consensus.migration.ConsensusMigrationState;
+import org.apache.cassandra.tcm.extensions.ExtensionKey;
+import org.apache.cassandra.tcm.extensions.ExtensionValue;
+import org.apache.cassandra.tcm.membership.Directory;
+import org.apache.cassandra.tcm.ownership.DataPlacements;
+import org.apache.cassandra.tcm.ownership.TokenMap;
+import org.apache.cassandra.tcm.sequences.InProgressSequences;
+import org.apache.cassandra.tcm.sequences.LockedRanges;
 import org.apache.commons.lang3.builder.MultilineRecursiveToStringStyle;
 import org.apache.commons.lang3.builder.ReflectionToStringBuilder;
 
+import accord.local.Node;
+import org.apache.cassandra.config.DataStorageSpec;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.Duration;
 import org.apache.cassandra.cql3.FieldIdentifier;
+import org.apache.cassandra.db.Clustering;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.ReadCommand;
 import org.apache.cassandra.db.SchemaCQLHelper;
 import org.apache.cassandra.db.SinglePartitionReadCommand;
 import org.apache.cassandra.db.Slices;
+import org.apache.cassandra.db.compaction.AbstractCompactionStrategy;
+import org.apache.cassandra.db.compaction.LeveledCompactionStrategy;
+import org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy;
+import org.apache.cassandra.db.compaction.SizeTieredCompactionStrategyOptions;
+import org.apache.cassandra.db.compaction.UnifiedCompactionStrategy;
+import org.apache.cassandra.db.compaction.unified.Controller;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.ByteBufferAccessor;
 import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.CounterColumnType;
 import org.apache.cassandra.db.marshal.EmptyType;
-import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.dht.ByteOrderedPartitioner;
@@ -82,6 +103,8 @@ import org.apache.cassandra.gms.ApplicationState;
 import org.apache.cassandra.gms.EndpointState;
 import org.apache.cassandra.gms.HeartBeatState;
 import org.apache.cassandra.gms.VersionedValue;
+import org.apache.cassandra.io.compress.LZ4Compressor;
+import org.apache.cassandra.io.compress.ZstdCompressor;
 import org.apache.cassandra.io.sstable.format.SSTableFormat;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.InetAddressAndPort;
@@ -94,18 +117,13 @@ import org.apache.cassandra.net.Message;
 import org.apache.cassandra.net.NoPayload;
 import org.apache.cassandra.net.PingRequest;
 import org.apache.cassandra.net.Verb;
-import org.apache.cassandra.schema.ColumnMetadata;
-import org.apache.cassandra.schema.KeyspaceMetadata;
-import org.apache.cassandra.schema.KeyspaceParams;
-import org.apache.cassandra.schema.MemtableParams;
-import org.apache.cassandra.schema.ReplicationParams;
-import org.apache.cassandra.schema.TableId;
-import org.apache.cassandra.schema.TableMetadata;
-import org.apache.cassandra.schema.TableParams;
-import org.apache.cassandra.schema.Tables;
-import org.apache.cassandra.schema.Types;
-import org.apache.cassandra.schema.UserFunctions;
-import org.apache.cassandra.schema.Views;
+import org.apache.cassandra.service.accord.fastpath.FastPathStrategy;
+import org.apache.cassandra.service.accord.AccordFastPath;
+import org.apache.cassandra.service.accord.AccordStaleReplicas;
+import org.apache.cassandra.service.accord.fastpath.InheritKeyspaceFastPathStrategy;
+import org.apache.cassandra.service.accord.fastpath.ParameterizedFastPathStrategy;
+import org.apache.cassandra.service.accord.fastpath.SimpleFastPathStrategy;
+import org.apache.cassandra.service.consensus.TransactionalMode;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
 import org.apache.cassandra.utils.AbstractTypeGenerators.TypeGenBuilder;
@@ -123,6 +141,7 @@ import static org.apache.cassandra.utils.Generators.IDENTIFIER_GEN;
 import static org.apache.cassandra.utils.Generators.SMALL_TIME_SPAN_NANOS;
 import static org.apache.cassandra.utils.Generators.TIMESTAMP_NANOS;
 import static org.apache.cassandra.utils.Generators.TINY_TIME_SPAN_NANOS;
+import static org.apache.cassandra.utils.Generators.directAndHeapBytes;
 
 public final class CassandraGenerators
 {
@@ -143,7 +162,7 @@ public final class CassandraGenerators
         return InetAddressAndPort.getByAddressOverrideDefaults(address, NETWORK_PORT_GEN.generate(rnd));
     };
 
-    public static final Gen<TableId> TABLE_ID_GEN = Generators.UUID_RANDOM_GEN.map(TableId::fromUUID);
+    public static final Gen<TableId> TABLE_ID_GEN = Generate.booleans().flatMap(uuid -> uuid ? Generators.UUID_RANDOM_GEN.map(TableId::fromUUID) : Generate.longRange(Long.MIN_VALUE, Long.MAX_VALUE).map(TableId::fromLong));
     private static final Gen<TableMetadata.Kind> TABLE_KIND_GEN = SourceDSL.arbitrary().pick(TableMetadata.Kind.REGULAR, TableMetadata.Kind.INDEX, TableMetadata.Kind.VIRTUAL);
     public static final Gen<TableMetadata> TABLE_METADATA_GEN = gen(rnd -> createTableMetadata(IDENTIFIER_GEN.generate(rnd), rnd)).describedAs(CassandraGenerators::toStringRecursive);
 
@@ -191,9 +210,85 @@ public final class CassandraGenerators
                                                                      cast(READ_REPAIR_RSP_GEN))
                                                               .describedAs(CassandraGenerators::toStringRecursive);
 
+    private static final Constraint CLUSTERING_OPTIONS = Constraint.between(0, 2);
+    public static final Gen<Clustering<?>> CLUSTERING_GEN = rnd -> {
+        switch ((int) rnd.next(CLUSTERING_OPTIONS))
+        {
+            case 0: return Clustering.EMPTY;
+            case 1: return Clustering.STATIC_CLUSTERING;
+            case 2: return Clustering.make(Generators.array(ByteBuffer.class, directAndHeapBytes(0, 10), SourceDSL.integers().between(1, 3)).generate(rnd));
+            default: throw new AssertionError();
+        }
+    };
+
     private CassandraGenerators()
     {
 
+    }
+
+    private static String humanReadableSignPrefix(RandomnessSource rnd)
+    {
+        switch (SourceDSL.integers().between(0, 2).generate(rnd))
+        {
+            case 0: return "";
+            case 1: return "-";
+            case 2: return "+";
+            default:
+                throw new AssertionError();
+        }
+    }
+
+    public static Gen<String> humanReadableStorageValue()
+    {
+        Gen<Long> valueGen = SourceDSL.longs().between(0, 1000);
+        return rnd -> {
+            // [+-]?\d+(\.\d+)?([eE]([+-]?)\d+)?
+            StringBuilder sb = new StringBuilder();
+            sb.append(humanReadableSignPrefix(rnd));
+            sb.append(valueGen.generate(rnd));
+            if (nextBoolean(rnd))
+            {
+                sb.append('.');
+                sb.append(valueGen.generate(rnd));
+            }
+            if (nextBoolean(rnd))
+            {
+                sb.append('E');
+                sb.append(humanReadableSignPrefix(rnd));
+                sb.append(valueGen.generate(rnd));
+            }
+            return sb.toString();
+        };
+    }
+
+    public static Gen<String> humanReadableStorage()
+    {
+        Gen<DataStorageSpec.DataStorageUnit> unitGen = SourceDSL.arbitrary().enumValues(DataStorageSpec.DataStorageUnit.class);
+        return rnd -> {
+            DataStorageSpec.DataStorageUnit unit = unitGen.generate(rnd);
+            String value;
+            switch (SourceDSL.integers().between(0, 2).generate(rnd))
+            {
+                case 0:
+                    value = "NaN";
+                    break;
+                case 1:
+                    value = humanReadableSignPrefix(rnd) + "Infinity";
+                    break;
+                case 2:
+                    value = humanReadableStorageValue().generate(rnd);
+                    break;
+                default:
+                    throw new AssertionError();
+            }
+            return value + ' ' + unit.getSymbol();
+        };
+    }
+
+    public static Gen<String> humanReadableStorageSimple()
+    {
+        Gen<DataStorageSpec.DataStorageUnit> unitGen = SourceDSL.arbitrary().enumValues(DataStorageSpec.DataStorageUnit.class);
+        return rnd -> humanReadableStorageValue().generate(rnd) + ' ' + unitGen.generate(rnd).getSymbol();
     }
 
     public static Set<UserType> extractUDTs(TableMetadata metadata)
@@ -403,7 +498,7 @@ public final class CassandraGenerators
                 AbstractReplicationStrategy replication = replicationGen.generate(rs).withKeyspace(nameGen).build().generate(rs);
                 ReplicationParams replicationParams = ReplicationParams.fromStrategy(replication);
                 boolean durableWrites = durableWritesGen.generate(rs);
-                KeyspaceParams params = new KeyspaceParams(durableWrites, replicationParams);
+                KeyspaceParams params = new KeyspaceParams(durableWrites, replicationParams, FastPathStrategy.simple());
                 Tables tables = Tables.none();
                 Views views = Views.none();
                 Types types = Types.none();
@@ -413,10 +508,293 @@ public final class CassandraGenerators
         }
     }
 
+    public static Gen<CachingParams> cachingParamsGen()
+    {
+        return rnd -> {
+            boolean cacheKeys = nextBoolean(rnd);
+            int rowsPerPartitionToCache;
+            switch (SourceDSL.integers().between(1, 3).generate(rnd))
+            {
+                case 1: // ALL
+                    rowsPerPartitionToCache = Integer.MAX_VALUE;
+                    break;
+                case 2: // NONE
+                    rowsPerPartitionToCache = 0;
+                    break;
+                case 3: // num values
+                    rowsPerPartitionToCache = Math.toIntExact(rnd.next(Constraint.between(1, Integer.MAX_VALUE - 1)));
+                    break;
+                default:
+                    throw new AssertionError();
+            }
+            return new CachingParams(cacheKeys, rowsPerPartitionToCache);
+        };
+    }
+
+    public enum KnownCompactionAlgo
+    {
+        SizeTiered(SizeTieredCompactionStrategy.class),
+        Leveled(LeveledCompactionStrategy.class),
+        Unified(UnifiedCompactionStrategy.class);
+        private final Class<? extends AbstractCompactionStrategy> klass;
+
+        KnownCompactionAlgo(Class<? extends AbstractCompactionStrategy> klass)
+        {
+            this.klass = klass;
+        }
+    }
+
+    public static class CompactionParamsBuilder
+    {
+        private Gen<KnownCompactionAlgo> algoGen = SourceDSL.arbitrary().enumValues(KnownCompactionAlgo.class);
+        private Gen<CompactionParams.TombstoneOption> tombstoneOptionGen = SourceDSL.arbitrary().enumValues(CompactionParams.TombstoneOption.class);
+        private Gen<Map<String, String>> sizeTieredOptions = rnd -> {
+            if (nextBoolean(rnd)) return Map.of();
+            Map<String, String> options = new HashMap<>();
+            if (nextBoolean(rnd))
+                // computes mb then converts to bytes
+                options.put(SizeTieredCompactionStrategyOptions.MIN_SSTABLE_SIZE_KEY, Long.toString(SourceDSL.longs().between(1, 100).generate(rnd) * 1024L * 1024L));
+            if (nextBoolean(rnd))
+                options.put(SizeTieredCompactionStrategyOptions.BUCKET_LOW_KEY, Double.toString(SourceDSL.doubles().between(0.1, 0.9).generate(rnd)));
+            if (nextBoolean(rnd))
+                options.put(SizeTieredCompactionStrategyOptions.BUCKET_HIGH_KEY, Double.toString(SourceDSL.doubles().between(1.1, 1.9).generate(rnd)));
+            return options;
+        };
+        private Gen<Map<String, String>> leveledOptions = rnd -> {
+            if (nextBoolean(rnd)) return Map.of();
+            Map<String, String> options = new HashMap<>();
+            if (nextBoolean(rnd))
+                options.putAll(sizeTieredOptions.generate(rnd));
+            int maxSSTableSizeInMB = LeveledCompactionStrategy.DEFAULT_MAX_SSTABLE_SIZE_MIB;
+            if (nextBoolean(rnd))
+            {
+                // size in mb
+                maxSSTableSizeInMB = SourceDSL.integers().between(1, 2_000).generate(rnd);
+                options.put(LeveledCompactionStrategy.SSTABLE_SIZE_OPTION, Integer.toString(maxSSTableSizeInMB));
+            }
+            if (nextBoolean(rnd))
+            {
+                // there is a relationship between sstable size and fanout, so respect it
+                // see CASSANDRA-20570: Leveled Compaction doesn't validate maxBytesForLevel when the table is altered/created
+                long maxSSTableSizeInBytes = maxSSTableSizeInMB * 1024L * 1024L;
+                Gen<Integer> gen = SourceDSL.integers().between(1, 100);
+                Integer value = gen.generate(rnd);
+                while (true)
+                {
+                    try
+                    {
+                        // see org.apache.cassandra.db.compaction.LeveledGenerations.MAX_LEVEL_COUNT for why 8 is hard coded here
+                        LeveledManifest.maxBytesForLevel(8, value, maxSSTableSizeInBytes);
+                        break; // value is good, keep it
+                    }
+                    catch (RuntimeException e)
+                    {
+                        // this value is too large... lets shrink it
+                        if (value.intValue() == 1)
+                            throw new AssertionError("There is no possible fanout size that works with maxSSTableSizeInMB=" + maxSSTableSizeInMB);
+                        gen = SourceDSL.integers().between(1, value - 1);
+                        value = gen.generate(rnd);
+                    }
+                }
+                options.put(LeveledCompactionStrategy.LEVEL_FANOUT_SIZE_OPTION, value.toString());
+            }
+            if (nextBoolean(rnd))
+                options.put(LeveledCompactionStrategy.SINGLE_SSTABLE_UPLEVEL_OPTION, nextBoolean(rnd).toString());
+            return options;
+        };
+        private Gen<Map<String, String>> unifiedOptions = rnd -> {
+            if (nextBoolean(rnd)) return Map.of();
+            Gen<String> storageSizeGen = Generators.filter(humanReadableStorageSimple(), s -> Controller.MIN_TARGET_SSTABLE_SIZE <= FBUtilities.parseHumanReadableBytes(s));
+            Map<String, String> options = new HashMap<>();
+            if (nextBoolean(rnd))
+                options.put(Controller.BASE_SHARD_COUNT_OPTION, SourceDSL.integers().between(1, 10).generate(rnd).toString());
+            if (nextBoolean(rnd))
+                options.put(Controller.FLUSH_SIZE_OVERRIDE_OPTION, storageSizeGen.generate(rnd));
+            if (nextBoolean(rnd))
+                options.put(Controller.MAX_SSTABLES_TO_COMPACT_OPTION, SourceDSL.integers().between(0, 32).generate(rnd).toString());
+            if (nextBoolean(rnd))
+                options.put(Controller.SSTABLE_GROWTH_OPTION, SourceDSL.integers().between(0, 100).generate(rnd) + "%");
+            if (nextBoolean(rnd))
+                options.put(Controller.OVERLAP_INCLUSION_METHOD_OPTION, SourceDSL.arbitrary().enumValues(Overlaps.InclusionMethod.class).generate(rnd).name());
+            if (nextBoolean(rnd))
+            {
+                int numLevels = SourceDSL.integers().between(1, 10).generate(rnd);
+                String[] scalingParams = new String[numLevels];
+                Gen<Integer> levelSize = SourceDSL.integers().between(2, 10);
+                for (int i = 0; i < numLevels; i++)
+                {
+                    String value;
+                    switch (SourceDSL.integers().between(0, 3).generate(rnd))
+                    {
+                        case 0:
+                            value = "N";
+                            break;
+                        case 1:
+                            value = "L" + levelSize.generate(rnd);
+                            break;
+                        case 2:
+                            value = "T" + levelSize.generate(rnd);
+                            break;
+                        case 3:
+                            value = SourceDSL.integers().all().generate(rnd).toString();
+                            break;
+                        default:
+                            throw new AssertionError();
+                    }
+                    scalingParams[i] = value;
+                }
+                options.put(Controller.SCALING_PARAMETERS_OPTION, String.join(",", scalingParams));
+            }
+            if (nextBoolean(rnd))
+            {
+                // Calculate TARGET then compute the MIN from that.  The issue is that there is a hidden relationship
+                // between these 2 fields more complex than simple comparability, MIN must be < 70% * TARGET!
+                // See CASSANDRA-20398
+                // 1MiB to 128MiB target
+                long targetBytes = SourceDSL.longs().between(1L << 20, 1L << 27).generate(rnd);
+                long limit = (long) Math.ceil(targetBytes * Math.sqrt(0.5));
+                long minBytes = SourceDSL.longs().between(1, limit - 1).generate(rnd);
+                options.put(Controller.MIN_SSTABLE_SIZE_OPTION, minBytes + "B");
+                options.put(Controller.TARGET_SSTABLE_SIZE_OPTION, targetBytes + "B");
+            }
+            return options;
+        };
+        //TODO (coverage): doesn't look to validate > 1, what does that even mean?
+        private Gen<Float> tombstoneThreshold = SourceDSL.floats().between(0, 1);
+        private Gen<Boolean> uncheckedTombstoneCompaction = SourceDSL.booleans().all();
+        private Gen<Boolean> onlyPurgeRepairedTombstones = SourceDSL.booleans().all();
+
+        public Gen<CompactionParams> build()
+        {
+            return rnd -> {
+                KnownCompactionAlgo algo = algoGen.generate(rnd);
+                Map<String, String> options = new HashMap<>();
+                if (nextBoolean(rnd))
+                    options.put(CompactionParams.Option.PROVIDE_OVERLAPPING_TOMBSTONES.toString(), tombstoneOptionGen.generate(rnd).name());
+                if (CompactionParams.supportsThresholdParams(algo.klass) && nextBoolean(rnd))
+                {
+                    options.put(CompactionParams.Option.MIN_THRESHOLD.toString(), Long.toString(rnd.next(Constraint.between(2, 4))));
+                    options.put(CompactionParams.Option.MAX_THRESHOLD.toString(), Long.toString(rnd.next(Constraint.between(5, 32))));
+                }
+                if (nextBoolean(rnd))
+                    options.put(AbstractCompactionStrategy.TOMBSTONE_THRESHOLD_OPTION, tombstoneThreshold.generate(rnd).toString());
+                if (nextBoolean(rnd))
+                    options.put(AbstractCompactionStrategy.UNCHECKED_TOMBSTONE_COMPACTION_OPTION, uncheckedTombstoneCompaction.generate(rnd).toString());
+                if (nextBoolean(rnd))
+                    options.put(AbstractCompactionStrategy.ONLY_PURGE_REPAIRED_TOMBSTONES, onlyPurgeRepairedTombstones.generate(rnd).toString());
+                switch (algo)
+                {
+                    case SizeTiered:
+                        options.putAll(sizeTieredOptions.generate(rnd));
+                        break;
+                    case Leveled:
+                        options.putAll(leveledOptions.generate(rnd));
+                        break;
+                    case Unified:
+                        options.putAll(unifiedOptions.generate(rnd));
+                        break;
+                    default:
+                        throw new UnsupportedOperationException(algo.name());
+                }
+                return CompactionParams.create(algo.klass, options);
+            };
+        }
+    }
+
+    private static Boolean nextBoolean(RandomnessSource rnd)
+    {
+        return SourceDSL.booleans().all().generate(rnd);
+    }
+
+    public static Gen<CompactionParams> compactionParamsGen()
+    {
+        return new CompactionParamsBuilder().build();
+    }
+
+    public enum KnownCompressionAlgo
+    {
+        snappy("SnappyCompressor"),
+        deflate("DeflateCompressor"),
+        lz4("LZ4Compressor"),
+        zstd("ZstdCompressor"),
+        noop("NoopCompressor");
+
+        private final String compressor;
+
+        KnownCompressionAlgo(String compressor)
+        {
+            this.compressor = compressor;
+        }
+    }
+
+    public static class CompressionParamsBuilder
+    {
+        private Gen<Boolean> enabledGen = SourceDSL.booleans().all();
+        private Gen<KnownCompressionAlgo> algoGen = SourceDSL.arbitrary().enumValues(KnownCompressionAlgo.class);
+        private Gen<Map<String, String>> lz4OptionsGen = rnd -> {
+            if (nextBoolean(rnd))
+                return Map.of();
+            Map<String, String> options = new HashMap<>();
+            if (nextBoolean(rnd))
+                options.put(LZ4Compressor.LZ4_COMPRESSOR_TYPE, nextBoolean(rnd) ? LZ4Compressor.LZ4_FAST_COMPRESSOR : LZ4Compressor.LZ4_HIGH_COMPRESSOR);
+            if (nextBoolean(rnd))
+                options.put(LZ4Compressor.LZ4_HIGH_COMPRESSION_LEVEL, Integer.toString(Math.toIntExact(rnd.next(Constraint.between(1, 17)))));
+            return options;
+        };
+        private Gen<Map<String, String>> zstdOptionsGen = rnd -> {
+            if (nextBoolean(rnd))
+                return Map.of();
+            int level = Math.toIntExact(rnd.next(Constraint.between(ZstdCompressor.FAST_COMPRESSION_LEVEL, ZstdCompressor.BEST_COMPRESSION_LEVEL)));
+            return Map.of(ZstdCompressor.COMPRESSION_LEVEL_OPTION_NAME, Integer.toString(level));
+        };
+
+        public Gen<CompressionParams> build()
+        {
+            return rnd -> {
+                if (!enabledGen.generate(rnd))
+                    return CompressionParams.noCompression();
+                KnownCompressionAlgo algo = algoGen.generate(rnd);
+                if (algo == KnownCompressionAlgo.noop)
+                    return CompressionParams.noop();
+                // when null disabled
+                int chunkLength = CompressionParams.DEFAULT_CHUNK_LENGTH;
+                double minCompressRatio = CompressionParams.DEFAULT_MIN_COMPRESS_RATIO;
+                Map<String, String> options;
+                switch (algo)
+                {
+                    case lz4:
+                        options = lz4OptionsGen.generate(rnd);
+                        break;
+                    case zstd:
+                        options = zstdOptionsGen.generate(rnd);
+                        break;
+                    default:
+                        options = Map.of();
+                }
+                return new CompressionParams(algo.compressor, options, chunkLength, minCompressRatio);
+            };
+        }
+    }
+
+    public static Gen<CompressionParams> compressionParamsGen()
+    {
+        return new CompressionParamsBuilder().build();
+    }
+
     public static class TableParamsBuilder
     {
         @Nullable
         private Gen<String> memtableKeyGen = null;
+        @Nullable
+        private Gen<CachingParams> cachingParamsGen = null;
+        @Nullable
+        private Gen<CompactionParams> compactionParamsGen = null;
+        @Nullable
+        private Gen<CompressionParams> compressionParamsGen = null;
+        @Nullable
+        private Gen<TransactionalMode> transactionalMode = null;
+        @Nullable
+        private Gen<FastPathStrategy> fastPathStrategy = null;
 
         public TableParamsBuilder withKnownMemtables()
         {
@@ -427,12 +805,115 @@ public final class CassandraGenerators
             return this;
         }
 
+        public TableParamsBuilder withCaching()
+        {
+            cachingParamsGen = cachingParamsGen();
+            return this;
+        }
+
+        public TableParamsBuilder withCompaction()
+        {
+            compactionParamsGen = compactionParamsGen();
+            return this;
+        }
+
+        public TableParamsBuilder withCompression()
+        {
+            compressionParamsGen = compressionParamsGen();
+            return this;
+        }
+
+        public TableParamsBuilder withTransactionalMode(Gen<TransactionalMode> transactionalMode)
+        {
+            this.transactionalMode = transactionalMode;
+            return this;
+        }
+
+        public TableParamsBuilder withTransactionalMode()
+        {
+            return withTransactionalMode(SourceDSL.arbitrary().enumValues(TransactionalMode.class));
+        }
+
+        public TableParamsBuilder withTransactionalMode(TransactionalMode transactionalMode)
+        {
+            return withTransactionalMode(SourceDSL.arbitrary().constant(transactionalMode));
+        }
+
+        public TableParamsBuilder withFastPathStrategy()
+        {
+            fastPathStrategy = rnd -> {
+                FastPathStrategy.Kind kind = SourceDSL.arbitrary().enumValues(FastPathStrategy.Kind.class).generate(rnd);
+                switch (kind)
+                {
+                    case SIMPLE:
+                        return SimpleFastPathStrategy.instance;
+                    case INHERIT_KEYSPACE:
+                        return InheritKeyspaceFastPathStrategy.instance;
+                    case PARAMETERIZED:
+                    {
+                        Map<String, String> map = new HashMap<>();
+                        int size = SourceDSL.integers().between(1, Integer.MAX_VALUE).generate(rnd);
+                        map.put(ParameterizedFastPathStrategy.SIZE, Integer.toString(size));
+                        Set<String> names = new HashSet<>();
+                        Gen<String> nameGen = SourceDSL.strings().allPossible().ofLengthBetween(1, 10)
+                                                       // If : is in the name then the parser will fail; we have validation to disalow this
+                                                       .map(s -> s.replace(":", "_"))
+                                                       // Names are used for DCs and those are seperated by ,
+                                                       .map(s -> s.replace(",", "_"))
+                                                       .assuming(s -> !s.trim().isEmpty());
+                        int numNames = SourceDSL.integers().between(1, 10).generate(rnd);
+                        for (int i = 0; i < numNames; i++)
+                        {
+                            while (!names.add(nameGen.generate(rnd)))
+                            {
+                            }
+                        }
+                        List<String> sortedNames = new ArrayList<>(names);
+                        sortedNames.sort(Comparator.naturalOrder());
+                        List<String> dcs = new ArrayList<>(names.size());
+                        boolean auto = SourceDSL.booleans().all().generate(rnd);
+                        if (auto)
+                        {
+                            dcs.addAll(sortedNames);
+                        }
+                        else
+                        {
+                            for (String name : sortedNames)
+                            {
+                                int weight = SourceDSL.integers().between(0, 10).generate(rnd);
+                                dcs.add(name + ":" + weight);
+                            }
+                        }
+                        // str: dcFormat(,dcFormat)*
+                        //      dcFormat: name | weight
+                        //      weight: int: >= 0
+                        //      note: can't mix auto and user defined weight; need one or the other.  Names must be unique
+                        map.put(ParameterizedFastPathStrategy.DCS, String.join(",", dcs));
+                        return ParameterizedFastPathStrategy.fromMap(map);
+                    }
+                    default:
+                        throw new UnsupportedOperationException(kind.name());
+                }
+            };
+            return this;
+        }
+
         public Gen<TableParams> build()
         {
             return rnd -> {
                 TableParams.Builder params = TableParams.builder();
                 if (memtableKeyGen != null)
                     params.memtable(MemtableParams.get(memtableKeyGen.generate(rnd)));
+                if (cachingParamsGen != null)
+                    params.caching(cachingParamsGen.generate(rnd));
+                if (compactionParamsGen != null)
+                    params.compaction(compactionParamsGen.generate(rnd));
+                if (compressionParamsGen != null)
+                    params.compression(compressionParamsGen.generate(rnd));
+                if (transactionalMode != null)
+                    params.transactionalMode(transactionalMode.generate(rnd));
+                if (fastPathStrategy != null)
+                    params.fastPath(fastPathStrategy.generate(rnd));
                 return params.build();
             };
         }
@@ -509,9 +990,27 @@ public final class CassandraGenerators
             return this;
         }
 
+        public TableMetadataBuilder withTransactionalMode(Gen<TransactionalMode> transactionalMode)
+        {
+            paramsBuilder.withTransactionalMode(transactionalMode);
+            return this;
+        }
+
+        public TableMetadataBuilder withTransactionalMode(TransactionalMode transactionalMode)
+        {
+            paramsBuilder.withTransactionalMode(transactionalMode);
+            return this;
+        }
+
         public TableMetadataBuilder withKnownMemtables()
         {
             paramsBuilder.withKnownMemtables();
+            return this;
+        }
+
+        public TableMetadataBuilder withParams(Consumer<TableParamsBuilder> fn)
+        {
+            fn.accept(paramsBuilder);
             return this;
         }
 
@@ -720,10 +1219,16 @@ public final class CassandraGenerators
         }
     }
 
+    public static Gen<ColumnMetadata> columnMetadataGen()
+    {
+        return columnMetadataGen(SourceDSL.arbitrary().enumValues(ColumnMetadata.Kind.class), AbstractTypeGenerators.typeGen());
+    }
+
     public static Gen<ColumnMetadata> columnMetadataGen(Gen<ColumnMetadata.Kind> kindGen, Gen<AbstractType<?>> typeGen)
     {
         Gen<String> ksNameGen = CassandraGenerators.KEYSPACE_NAME_GEN;
         Gen<String> tableNameGen = IDENTIFIER_GEN;
+
         return rs -> {
             String ks = ksNameGen.generate(rs);
             String table = tableNameGen.generate(rs);
@@ -750,7 +1255,7 @@ public final class CassandraGenerators
             // empty type is also not supported, so filter out
             case PARTITION_KEY:
             case CLUSTERING:
-                typeGen = Generators.filter(typeGen, t -> t != EmptyType.instance).map(AbstractType::freeze);
+                typeGen = Generators.filter(typeGen, t -> t != EmptyType.instance && t != CounterColumnType.instance).map(AbstractType::freeze);
                 break;
         }
         if (kind == ColumnMetadata.Kind.CLUSTERING)
@@ -763,7 +1268,7 @@ public final class CassandraGenerators
         ColumnIdentifier name = new ColumnIdentifier(str, true);
         int position = !kind.isPrimaryKeyKind() ? -1 : kindOffset;
         AbstractType<?> type = typeGen.generate(rnd);
-        return new ColumnMetadata(ks, table, name, type, position, kind, null);
+        return new ColumnMetadata(ks, table, name, type, ColumnMetadata.NO_UNIQUE_ID, position, kind, null);
     }
 
     public static Gen<ByteBuffer> partitionKeyDataGen(TableMetadata metadata)
@@ -1030,24 +1535,6 @@ public final class CassandraGenerators
         return SourceDSL.arbitrary().enumValues(SupportedPartitioners.class)
                         .assuming(p -> p != SupportedPartitioners.Local)
                         .flatMap(SupportedPartitioners::partitioner);
-    }
-
-    /**
-     * For {@link LocalPartitioner} it can have a very complex type which can lead to generating data larger than
-     * allowed in a primary key.  If a test needs to filter out those cases, can just
-     * {@code .map(CassandraGenerators::simplify)} to resolve.
-     */
-    public static IPartitioner simplify(IPartitioner partitioner)
-    {
-        // serializers require tokens to fit within 1 << 16, but that makes the test flakey when LocalPartitioner with a nested type is found...
-        if (!(partitioner instanceof LocalPartitioner)) return partitioner;
-        if (!shouldSimplify(partitioner.getTokenValidator())) return partitioner;
-        return new LocalPartitioner(Int32Type.instance);
-    }
-
-    private static boolean shouldSimplify(AbstractType<?> type)
-    {
-        return AbstractTypeGenerators.contains(type, t -> t.isCollection());
     }
 
     public static Gen<Token> token()
@@ -1358,7 +1845,7 @@ public final class CassandraGenerators
     public static Gen<Epoch> epochs()
     {
         return rnd -> {
-            if (SourceDSL.booleans().all().generate(rnd))
+            if (nextBoolean(rnd))
             {
                 switch (SourceDSL.arbitrary().enumValues(EpochConstants.class).generate(rnd))
                 {
@@ -1372,5 +1859,63 @@ public final class CassandraGenerators
 
             return Epoch.create(SourceDSL.longs().between(2, Long.MAX_VALUE).generate(rnd));
         };
+    }
+
+    public static Gen<Node.Id> accordNodeId()
+    {
+        return SourceDSL.integers().between(0, Integer.MAX_VALUE).map(Node.Id::new);
+    }
+
+    public static Gen<AccordStaleReplicas> accordStaleReplicas()
+    {
+        Gen<Set<Node.Id>> staleIdsGen = Generators.set(accordNodeId(), SourceDSL.integers().between(0, 10));
+        Gen<Epoch> epochGen = epochs();
+        return rnd -> new AccordStaleReplicas(staleIdsGen.generate(rnd), epochGen.generate(rnd));
+    }
+
+    public static Gen<AccordFastPath> accordFastPath()
+    {
+        Gen<List<Node.Id>> nodesGen = Generators.uniqueList(accordNodeId(), SourceDSL.integers().between(0, 10));
+        Gen<AccordFastPath.Status> statusGen = SourceDSL.arbitrary().enumValues(AccordFastPath.Status.class);
+        Gen<Long> updateTimeMillis = TIMESTAMP_NANOS.map(TimeUnit.NANOSECONDS::toMillis);
+        Gen<Long> updateDelayMillis = SourceDSL.longs().between(0, TimeUnit.HOURS.toMillis(2));
+        return rnd -> {
+            AccordFastPath accum = AccordFastPath.EMPTY;
+            for (Node.Id node : nodesGen.generate(rnd))
+            {
+                AccordFastPath.Status status = statusGen.generate(rnd);
+                // can't add a NORMAL node that doesn't exist, it must be ab-NORMAL first...
+                if (status == AccordFastPath.Status.NORMAL)
+                    accum = accum.withNodeStatusSince(node, AccordFastPath.Status.UNAVAILABLE, 0, 0);
+                accum = accum.withNodeStatusSince(node, status, updateTimeMillis.generate(rnd), updateDelayMillis.generate(rnd));
+            }
+            return accum;
+        };
+    }
+
+    public static class ClusterMetadataBuilder
+    {
+        private Gen<Epoch> epochGen = epochs();
+        private Gen<IPartitioner> partitionerGen = nonLocalPartitioners();
+        private Gen<AccordStaleReplicas> accordStaleReplicasGen = accordStaleReplicas();
+        private Gen<AccordFastPath> accordFastPathGen = accordFastPath();
+        public Gen<ClusterMetadata> build()
+        {
+            return rnd -> {
+                Epoch epoch = epochGen.generate(rnd);
+                IPartitioner partitioner = partitionerGen.generate(rnd);
+                Directory directory = Directory.EMPTY;
+                DistributedSchema schema = DistributedSchema.first(directory.knownDatacenters());
+                TokenMap tokenMap = new TokenMap(partitioner);
+                DataPlacements placements = DataPlacements.EMPTY;
+                AccordFastPath accordFastPath = accordFastPathGen.generate(rnd);
+                LockedRanges lockedRanges = LockedRanges.EMPTY;
+                InProgressSequences inProgressSequences = InProgressSequences.EMPTY;
+                ConsensusMigrationState consensusMigrationState = ConsensusMigrationState.EMPTY;
+                Map<ExtensionKey<?, ?>, ExtensionValue<?>> extensions = ImmutableMap.of();
+                AccordStaleReplicas accordStaleReplicas = accordStaleReplicasGen.generate(rnd);
+                return new ClusterMetadata(epoch, partitioner, schema, directory, tokenMap, placements, accordFastPath, lockedRanges, inProgressSequences, consensusMigrationState, extensions, accordStaleReplicas);
+            };
+        }
     }
 }

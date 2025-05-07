@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import javax.annotation.Nullable;
+
 import org.apache.cassandra.cql3.AssignmentTestable;
 import org.apache.cassandra.cql3.CQL3Type;
 import org.apache.cassandra.cql3.ColumnSpecification;
@@ -209,20 +211,12 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
 
     public void checkConstraints(ByteBuffer bytes, ColumnConstraints constraints) throws ConstraintViolationException
     {
-        if (constraints.isEmpty())
-            return;
-
-        T value = getSerializer().deserialize(bytes);
-        constraints.evaluate(this, bytes);
+        checkConstraints(bytes, constraints.getConstraints());
     }
 
-    public void checkConstraints(ByteBuffer bytes, List<ColumnConstraint> constraints) throws ConstraintViolationException
+    public void checkConstraints(ByteBuffer bytes, List<ColumnConstraint<?>> constraints) throws ConstraintViolationException
     {
-        if (constraints.isEmpty())
-            return;
-
-        T value = getSerializer().deserialize(bytes);
-        for (ColumnConstraint constraint : constraints)
+        for (ColumnConstraint<?> constraint : constraints)
             constraint.evaluate(this, bytes);
     }
 
@@ -446,7 +440,7 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
         return false;
     }
 
-    public AbstractType<?> freeze()
+    public AbstractType<T> freeze()
     {
         return this;
     }
@@ -472,14 +466,6 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
     public AbstractType<?> freezeNestedMulticellTypes()
     {
         return this;
-    }
-
-    /**
-     * Returns {@code true} for types where empty should be handled like {@code null} like {@link Int32Type}.
-     */
-    public boolean isEmptyValueMeaningless()
-    {
-        return false;
     }
 
     /**
@@ -535,6 +521,22 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>, Assignm
     public boolean allowsEmpty()
     {
         return false;
+    }
+
+    /**
+     * Returns {@code true} for types where empty should be handled like {@code null} like {@link Int32Type}.
+     */
+    public boolean isEmptyValueMeaningless()
+    {
+        return false;
+    }
+
+    @Nullable
+    public ByteBuffer sanitize(@Nullable ByteBuffer bb)
+    {
+        if (bb == null) return null;
+        // not checking allowsEmpty as this method assumes that the bb has already passed validation for the type
+        return bb.remaining() == 0 && isEmptyValueMeaningless() ? null : bb;
     }
 
     public boolean isNull(ByteBuffer bb)

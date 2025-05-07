@@ -30,6 +30,16 @@ public class StandardVisitors
             return new Literal(b.value(), b.type());
         }
     };
+    public static final Visitor LITERAL_TO_BIND = new Visitor()
+    {
+        @Override
+        public Value visit(Value v)
+        {
+            if (!(v instanceof Literal)) return v;
+            Literal b = (Literal) v;
+            return new Bind(b.value(), b.type());
+        }
+    };
 
     public static final Visitor UNWRAP_TYPE_HINT = new Visitor()
     {
@@ -50,7 +60,7 @@ public class StandardVisitors
         public Expression visit(Expression e)
         {
             if (!(e instanceof Operator)) return e;
-            return new Bind(ExpressionEvaluator.tryEval((Operator) e).get(), e.type());
+            return new Bind(ExpressionEvaluator.eval((Operator) e), e.type());
         }
     };
 

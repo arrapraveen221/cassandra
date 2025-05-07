@@ -35,6 +35,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import javax.annotation.Nullable;
@@ -60,6 +61,7 @@ import org.apache.cassandra.cql3.ast.Value;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.IntegerType;
+import org.apache.cassandra.db.marshal.ListType;
 import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.MapType;
 import org.apache.cassandra.db.marshal.SetType;
@@ -98,7 +100,7 @@ public class ASTGenerators
         throw new AssertionError("Unsupported map type: " + map.getClass());
     }
 
-    public static Gen<AssignmentOperator> assignmentOperatorGen(EnumSet<AssignmentOperator.Kind> allowed, Expression right)
+    private static Gen<AssignmentOperator> assignmentOperatorGen(EnumSet<AssignmentOperator.Kind> allowed, Expression right)
     {
         if (allowed.isEmpty())
             throw new IllegalArgumentException("Unable to create a operator gen for empty set of allowed operators");
@@ -165,6 +167,7 @@ public class ASTGenerators
         private Gen<?> valueGen;
         private Gen<Boolean> useOperator = SourceDSL.booleans().all();
         private Gen<Boolean> useEmpty = SourceDSL.arbitrary().constant(false);
+        private Gen<Boolean> useNull = SourceDSL.arbitrary().constant(false);
         private BiFunction<Object, AbstractType<?>, Gen<Value>> literalOrBindGen = ASTGenerators::valueGen;
 
         public ExpressionBuilder(AbstractType<?> type)
@@ -181,9 +184,21 @@ public class ASTGenerators
             return this;
         }
 
+        public ExpressionBuilder allowNull()
+        {
+            useNull = SourceDSL.integers().between(1, 100).map(i -> i < 10);
+            return this;
+        }
+
         public ExpressionBuilder withOperators()
         {
             useOperator = i -> true;
+            return this;
+        }
+
+        public ExpressionBuilder withOperators(Gen<Boolean> useOperator)
+        {
+            this.useOperator = Objects.requireNonNull(useOperator);
             return this;
         }
 
@@ -210,6 +225,8 @@ public class ASTGenerators
             //TODO (coverage): rather than single level operators, allow nested (a + b + c + d)
             Gen<Value> leaf = rs -> literalOrBindGen.apply(valueGen.generate(rs), type).generate(rs);
             return rs -> {
+                if (useNull.generate(rs))
+                    return new Bind(null, type);
                 if (useEmpty.generate(rs))
                     return new Bind(ByteBufferUtil.EMPTY_BYTE_BUFFER, type);
                 Expression e = leaf.generate(rs);
@@ -357,6 +374,10 @@ public class ASTGenerators
         private BiFunction<RandomnessSource, List<Symbol>, List<Symbol>> ifConditionFilter = (rnd, symbols) -> symbols;
         private Gen<DeleteKind> deleteKindGen = SourceDSL.arbitrary().enumValues(DeleteKind.class);
         private Map<Symbol, ExpressionBuilder> columnExpressions = new LinkedHashMap<>();
+        private boolean allowPartitionOnlyUpdate = true;
+        private boolean allowPartitionOnlyInsert = true;
+        private boolean allowUpdateMultipleClusteringKeys = true;
+        private EnumSet<KnownIssue> ignoreIssues = IGNORE_ISSUES;
 
         public MutationGenBuilder(TableMetadata metadata)
         {
@@ -375,9 +396,46 @@ public class ASTGenerators
                 columnExpressions.put(symbol, new ExpressionBuilder(symbol.type()));
         }
 
+        public MutationGenBuilder withIgnoreIssues(EnumSet<KnownIssue> ignoreIssues)
+        {
+            this.ignoreIssues = Objects.requireNonNull(ignoreIssues);
+            return this;
+        }
+
+        public MutationGenBuilder withAllowPartitionOnlyUpdate(boolean value)
+        {
+            this.allowPartitionOnlyUpdate = value;
+            return this;
+        }
+
+        public MutationGenBuilder withAllowPartitionOnlyInsert(boolean value)
+        {
+            this.allowPartitionOnlyInsert = value;
+            return this;
+        }
+
+        public MutationGenBuilder withAllowUpdateMultipleClusteringKeys(boolean allowUpdateMultipleClusteringKeys)
+        {
+            this.allowUpdateMultipleClusteringKeys = allowUpdateMultipleClusteringKeys;
+            return this;
+        }
+
+        public MutationGenBuilder withColumnExpressions(Consumer<ExpressionBuilder> fn)
+        {
+            for (Symbol symbol : allColumns)
+                fn.accept(columnExpressions.get(symbol));
+            return this;
+        }
+
         public MutationGenBuilder allowEmpty(Symbol symbol)
         {
             columnExpressions.get(symbol).allowEmpty();
+            return this;
+        }
+
+        public MutationGenBuilder allowNull(Symbol symbol)
+        {
+            columnExpressions.get(symbol).allowNull();
             return this;
         }
 
@@ -418,7 +476,7 @@ public class ASTGenerators
 
         public MutationGenBuilder withCasGen(Gen<Boolean> withCasGen)
         {
-            withCasGen = Objects.requireNonNull(withCasGen);
+            this.withCasGen = Objects.requireNonNull(withCasGen);
             return this;
         }
 
@@ -505,9 +563,34 @@ public class ASTGenerators
             }
             else
             {
-                //TODO (coverage): support IN rather than just EQ
                 for (Symbol s : columns)
                     builder.value(s, columnExpressions.get(s).build().generate(rnd));
+            }
+        }
+
+        private static void where(RandomnessSource rnd,
+                                  Map<Symbol, ExpressionBuilder> columnExpressions,
+                                  Conditional.ConditionalBuilder<?> builder,
+                                  LinkedHashSet<Symbol> columns,
+                                  @Nullable Gen<? extends Map<Symbol, Object>> gen)
+        {
+            if (gen != null)
+            {
+                Map<Symbol, Object> map = gen.generate(rnd);
+                for (Map.Entry<Symbol, ?> e : assertDeterministic(map).entrySet())
+                    builder.value(e.getKey(), valueGen(e.getValue(), e.getKey().type()).generate(rnd));
+                return;
+            }
+
+            for (Symbol s : columns)
+            {
+                if (SourceDSL.booleans().all().generate(rnd))
+                {
+                    builder.value(s, columnExpressions.get(s).build().generate(rnd));
+                    continue;
+                }
+                var valueGen = columnExpressions.get(s).build();
+                builder.in(s, SourceDSL.lists().of(valueGen).ofSizeBetween(1, 3).generate(rnd));
             }
         }
 
@@ -515,6 +598,10 @@ public class ASTGenerators
         {
             Gen<Boolean> bool = SourceDSL.booleans().all();
             Map<? extends AbstractType<?>, List<Reference>> typeToReference = references.stream().collect(Collectors.groupingBy(Reference::type));
+            if (allowUpdateMultipleClusteringKeys
+                && ignoreIssues.contains(KnownIssue.STATIC_LIST_APPEND_WITH_CLUSTERING_IN)
+                && staticColumns.stream().anyMatch(s -> s.type().isMultiCell() && s.type().getClass() == ListType.class))
+                allowUpdateMultipleClusteringKeys = false;
             return rnd -> {
                 Mutation.Kind kind = kindGen.generate(rnd);
                 // when there are not non-primary-columns then can't support UPDATE
@@ -543,6 +630,12 @@ public class ASTGenerators
                         if (timestamp.isPresent())
                             builder.timestamp(valueGen(timestamp.getAsLong(), LongType.instance).generate(rnd));
                         values(rnd, columnExpressions, builder, partitionColumns, partitionValueGen);
+                        if (!staticColumns.isEmpty() && allowPartitionOnlyInsert && bool.generate(rnd))
+                        {
+                            var columnsToGenerate = new LinkedHashSet<>(subset(rnd, staticColumns));
+                            generateRemaining(rnd, bool, Mutation.Kind.INSERT, isTransaction, typeToReference, builder, columnsToGenerate);
+                            return builder.build();
+                        }
                         values(rnd, columnExpressions, builder, clusteringColumns, clusteringValueGen);
                         LinkedHashSet<Symbol> columnsToGenerate;
                         if (regularAndStaticColumns.isEmpty())
@@ -572,6 +665,35 @@ public class ASTGenerators
                         var timestamp = timestampGen.generate(rnd);
                         if (timestamp.isPresent())
                             builder.timestamp(valueGen(timestamp.getAsLong(), LongType.instance).generate(rnd));
+                        if (allowUpdateMultipleClusteringKeys)
+                            where(rnd, columnExpressions, builder, partitionColumns, partitionValueGen);
+                        else
+                            values(rnd, columnExpressions, builder, partitionColumns, partitionValueGen);
+
+                        if (!staticColumns.isEmpty() && allowPartitionOnlyUpdate && bool.generate(rnd))
+                        {
+                            var columnsToGenerate = new LinkedHashSet<>(subset(rnd, staticColumns));
+                            Conditional.EqBuilder<Mutation.UpdateBuilder> setBuilder = builder::set;
+                            generateRemaining(rnd, bool, Mutation.Kind.UPDATE, isTransaction, typeToReference, setBuilder, columnsToGenerate);
+
+                            if (isCas)
+                            {
+                                if (useCasIf.generate(rnd))
+                                {
+                                    ifGen(new ArrayList<>(staticColumns)).generate(rnd).ifPresent(c -> builder.ifCondition(c));
+                                }
+                                else
+                                {
+                                    builder.ifExists();
+                                }
+                            }
+                            return builder.build();
+                        }
+                        if (allowUpdateMultipleClusteringKeys)
+                            where(rnd, columnExpressions, builder, clusteringColumns, clusteringValueGen);
+                        else
+                            values(rnd, columnExpressions, builder, clusteringColumns, clusteringValueGen);
+
                         if (isCas)
                         {
                             if (useCasIf.generate(rnd))
@@ -583,8 +705,6 @@ public class ASTGenerators
                                 builder.ifExists();
                             }
                         }
-                        values(rnd, columnExpressions, builder, partitionColumns, partitionValueGen);
-                        values(rnd, columnExpressions, builder, clusteringColumns, clusteringValueGen);
 
                         LinkedHashSet<Symbol> columnsToGenerate;
                         if (regularAndStaticColumns.size() == 1 || bool.generate(rnd))
@@ -770,12 +890,12 @@ public class ASTGenerators
                     }
                 }
             }
-            if (kind == Mutation.Kind.UPDATE && isTransaction)
+            if (kind == Mutation.Kind.UPDATE)
             {
                 for (Symbol c : new ArrayList<>(columnsToGenerate))
                 {
                     var useOperator = columnExpressions.get(c).useOperator;
-                    EnumSet<AssignmentOperator.Kind> additionOperatorAllowed = AssignmentOperator.supportsOperators(c.type());
+                    EnumSet<AssignmentOperator.Kind> additionOperatorAllowed = AssignmentOperator.supportsOperators(c.type(), isTransaction);
                     if (!additionOperatorAllowed.isEmpty() && useOperator.generate(rnd))
                     {
                         Expression expression = columnExpressions.get(c).build().generate(rnd);
@@ -884,6 +1004,7 @@ public class ASTGenerators
                                                          .withoutCas()
                                                          .withoutTimestamp()
                                                          .withoutTtl()
+                                                         .withAllowUpdateMultipleClusteringKeys(false)
                                                          .withReferences(new ArrayList<>(builder.allowedReferences()));
                     if (!allowReferences)
                         mutationBuilder.withReferences(Collections.emptyList());

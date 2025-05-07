@@ -20,11 +20,15 @@ package org.apache.cassandra.cql3.ast;
 
 import java.nio.ByteBuffer;
 
+import javax.annotation.Nullable;
+
 import org.apache.cassandra.db.marshal.AbstractType;
 
 public interface Value extends Expression
 {
+    @Nullable
     Object value();
+    @Nullable
     ByteBuffer valueEncoded();
     Value with(Object value, AbstractType<?> type);
 
@@ -32,5 +36,10 @@ public interface Value extends Expression
     default Value visit(Visitor v)
     {
         return v.visit(this);
+    }
+
+    default String debugCQL()
+    {
+        return visit(StandardVisitors.DEBUG).toCQL();
     }
 }

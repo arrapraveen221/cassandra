@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.Int32Type;
+import org.apache.cassandra.db.marshal.LongType;
 import org.apache.cassandra.db.marshal.StringType;
 
 public class Literal implements Value
@@ -41,6 +42,11 @@ public class Literal implements Value
         return new Literal(value, Int32Type.instance);
     }
 
+    public static Literal of(long value)
+    {
+        return new Literal(value, LongType.instance);
+    }
+
     @Override
     public AbstractType<?> type()
     {
@@ -56,6 +62,7 @@ public class Literal implements Value
     @Override
     public ByteBuffer valueEncoded()
     {
+        if (value == null) return null;
         return value instanceof ByteBuffer ? (ByteBuffer) value : ((AbstractType) type).decompose(value);
     }
 
@@ -69,6 +76,11 @@ public class Literal implements Value
     public void toCQL(StringBuilder sb, CQLFormatter formatter)
     {
         ByteBuffer bytes = valueEncoded();
+        if (bytes == null)
+        {
+            sb.append("null");
+            return;
+        }
         if (bytes.remaining() == 0 && !actuallySupportsEmpty(type))
         {
             sb.append("<empty bytes>");

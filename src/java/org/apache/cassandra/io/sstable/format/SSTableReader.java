@@ -179,7 +179,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     public static final Comparator<SSTableReader> maxTimestampAscending = Comparator.comparingLong(SSTableReader::getMaxTimestamp);
     public static final Comparator<SSTableReader> maxTimestampDescending = maxTimestampAscending.reversed();
 
-    private static final TimeUUID.Generator.Factory<UniqueIdentifier> UNIQUE_IDENTIFIER_FACTORY = new TimeUUID.Generator.Factory<UniqueIdentifier>()
+    public static final TimeUUID.Generator.Factory<UniqueIdentifier> UNIQUE_IDENTIFIER_FACTORY = new TimeUUID.Generator.Factory<UniqueIdentifier>()
     {
         @Override
         public UniqueIdentifier atUnixMicrosWithLsb(long unixMicros, long clockSeqAndNode)
@@ -197,6 +197,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
             super(unixMicros, clockSeqAndNode);
         }
     }
+
     public final UniqueIdentifier instanceId = TimeUUID.Generator.nextTimeUUID(UNIQUE_IDENTIFIER_FACTORY);
 
     public static final Comparator<SSTableReader> firstKeyComparator = (o1, o2) -> o1.getFirst().compareTo(o2.getFirst());
@@ -474,7 +475,7 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
         this.openReason = builder.getOpenReason();
         this.first = builder.getFirst();
         this.last = builder.getLast();
-        this.interval = Interval.create(first, last, this);
+        this.interval = first == null || last == null ? null : Interval.create(first, last, this);
         this.bounds = first == null || last == null || AbstractBounds.strictlyWrapsAround(first.getToken(), last.getToken())
                       ? null // this will cause the validation to fail, but the reader is opened with no validation,
                              // e.g. for scrubbing, we should accept screwed bounds
@@ -939,8 +940,10 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
      */
     public KeyIterator keyIterator() throws IOException
     {
-        return new KeyIterator(keyReader(), getPartitioner(), uncompressedLength(), new ReentrantReadWriteLock());
+        return new KeyIterator(null, keyReader(), getPartitioner(), uncompressedLength(), new ReentrantReadWriteLock());
     }
+
+    public abstract KeyIterator keyIterator(AbstractBounds<PartitionPosition> range) throws IOException;
 
     /**
      * Finds and returns the first key beyond a given token in this SSTable or null if no such key exists.
@@ -1372,6 +1375,11 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
     public RandomAccessReader openDataReader()
     {
         return dfile.createReader();
+    }
+
+    public RandomAccessReader openDataReaderForScan()
+    {
+        return dfile.createReaderForScan();
     }
 
     public void trySkipFileCacheBefore(DecoratedKey key)
@@ -1868,11 +1876,17 @@ public abstract class SSTableReader extends SSTable implements UnfilteredSource,
                                           boolean isOffline,
                                           IVerifier.Options options);
 
+    public UniqueIdentifier instanceId()
+    {
+        return instanceId;
+    }
+
     @Override
     public int compareTo(SSTableReader other)
     {
         // Used in IntervalTree with the expecation that compareTo uniquely identifies an SSTableReader
-        return instanceId.compareTo(other.instanceId);
+        // Use accessor for instanceId for mocks
+        return instanceId().compareTo(other.instanceId());
     }
 
     /**

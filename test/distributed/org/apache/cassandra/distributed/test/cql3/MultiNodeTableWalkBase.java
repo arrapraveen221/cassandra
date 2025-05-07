@@ -21,11 +21,19 @@ package org.apache.cassandra.distributed.test.cql3;
 import java.io.IOException;
 
 import accord.utils.RandomSource;
+import net.bytebuddy.ByteBuddy;
+import net.bytebuddy.dynamic.loading.ClassLoadingStrategy;
+import net.bytebuddy.implementation.MethodDelegation;
 import org.apache.cassandra.distributed.Cluster;
 import org.apache.cassandra.distributed.api.ConsistencyLevel;
+import org.apache.cassandra.distributed.api.IInstanceConfig;
 import org.apache.cassandra.distributed.api.IInvokableInstance;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
+import org.apache.cassandra.utils.Shared;
+import org.apache.cassandra.utils.TimeUUID;
+
+import static net.bytebuddy.matcher.ElementMatchers.named;
 
 public abstract class MultiNodeTableWalkBase extends SingleNodeTableWalkTest
 {
@@ -52,13 +60,24 @@ public abstract class MultiNodeTableWalkBase extends SingleNodeTableWalkTest
     @Override
     protected Cluster createCluster() throws IOException
     {
-        return createCluster(mockMultiNode ? 1 : 3, c -> {
-            c.set("range_request_timeout", "180s")
-             .set("read_request_timeout", "180s")
-             .set("write_request_timeout", "180s")
-             .set("native_transport_timeout", "180s")
-             .set("slow_query_log_timeout", "180s");
-        });
+        return createCluster(mockMultiNode ? 1 : 3);
+    }
+
+    @Override
+    protected void clusterConfig(IInstanceConfig c)
+    {
+        super.clusterConfig(c);
+        c.set("range_request_timeout", "180s")
+         .set("read_request_timeout", "180s")
+         .set("write_request_timeout", "180s")
+         .set("native_transport_timeout", "180s")
+         .set("slow_query_log_timeout", "180s");
+    }
+
+    @Override
+    protected void clusterInitializer(ClassLoader cl, int node)
+    {
+        BBHelper.install(cl, node);
     }
 
     @Override
@@ -67,32 +86,11 @@ public abstract class MultiNodeTableWalkBase extends SingleNodeTableWalkTest
         return new MultiNodeState(rs, cluster);
     }
 
-    private class MultiNodeState extends State
+    protected class MultiNodeState extends State
     {
         public MultiNodeState(RandomSource rs, Cluster cluster)
         {
             super(rs, cluster);
-        }
-
-        @Override
-        public boolean allowNonPartitionQuery()
-        {
-            // This is disabled to make CI stable.  There are known issues that are being fixed so have to exclude for now
-            return false;
-        }
-
-        @Override
-        public boolean allowNonPartitionMultiColumnQuery()
-        {
-            // This is disabled to make CI stable.  There are known issues that are being fixed so have to exclude for now
-            return false;
-        }
-
-        @Override
-        public boolean allowPartitionQuery()
-        {
-            // This is disabled to make CI stable.  There are known issues that are being fixed so have to exclude for now
-            return false;
         }
 
         @Override
@@ -101,6 +99,12 @@ public abstract class MultiNodeTableWalkBase extends SingleNodeTableWalkTest
             // When a seed fails its useful to rerun the test as a single node to see if the issue persists... but doing so corrupts the random history!
             // To avoid that, this method hard codes that the test is multi node...
             return true;
+        }
+
+        @Override
+        protected boolean allowRepair()
+        {
+            return hasEnoughMemtableForRepair() || hasEnoughSSTablesForRepair();
         }
 
         @Override
@@ -124,6 +128,44 @@ public abstract class MultiNodeTableWalkBase extends SingleNodeTableWalkTest
         protected ConsistencyLevel mutationCl()
         {
             return ConsistencyLevel.NODE_LOCAL;
+        }
+    }
+
+    /**
+     * This is not a deterministic clock for TimeUUID, but it's a monotonic clock, which means that any instance that gets
+     * a TimeUUID from this clock has the propery that its happens-after all other ones cross all instances.
+     *
+     * This class came around because TimeUUID.Generator.nextUnixMicros works with milliseconds, and when time doesn't
+     * move forward (goes back or test is "too fast") then it becomes an instance local bump-counter; this counter allows
+     * a logically later timeuuid to happens-before a logically earlier one!
+     */
+    @Shared
+    public static class GlobalClock
+    {
+        private static long lastMicros = 0;
+        public synchronized static long nextUnixMicros()
+        {
+            return ++lastMicros;
+        }
+
+        public synchronized static void reset()
+        {
+            // this method isn't actually needed for the property of this class, but it does help isolate any non-deterministic issues
+            lastMicros = 0;
+        }
+    }
+
+    public static class BBHelper
+    {
+        static void install(ClassLoader cl, int nodeNumber)
+        {
+            new ByteBuddy().rebase(TimeUUID.Generator.class)
+                           .method(named("nextUnixMicros"))
+                           .intercept(MethodDelegation.to(GlobalClock.class))
+                           .make()
+                           .load(cl, ClassLoadingStrategy.Default.INJECTION);
+
+            GlobalClock.reset();
         }
     }
 }

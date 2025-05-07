@@ -21,8 +21,10 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -87,7 +89,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
     private static final Logger logger = LoggerFactory.getLogger(RowFilter.class);
 
     public static final Serializer serializer = new Serializer();
-    private static final RowFilter NONE = new RowFilter(Collections.emptyList(), false);
+    public static final RowFilter NONE = new RowFilter(Collections.emptyList(), false);
 
     protected final List<Expression> expressions;
 
@@ -172,15 +174,21 @@ public class RowFilter implements Iterable<RowFilter.Expression>
      */
     public boolean isMutableIntersection()
     {
-        int count = 0;
+        Set<ColumnMetadata> columns = null;
         for (Expression e : expressions)
         {
             if (e.column.isStatic() && expressions.size() > 1)
                 return true;
 
             if (!e.column.isPrimaryKeyColumn())
-                if (++count > 1)
+            {
+                if (columns == null)
+                    columns = new HashSet<>(expressions.size());
+
+                columns.add(e.column);
+                if (columns.size() > 1)
                     return true;
+            }
         }
         return false;
     }
@@ -256,7 +264,10 @@ public class RowFilter implements Iterable<RowFilter.Expression>
             @Override
             public Row applyToRow(Row row)
             {
-                Row purged = row.purge(DeletionPurger.PURGE_ALL, nowInSec, metadata.enforceStrictLiveness());
+                // If we purge deletions when reconciliation is required, we hide information replica filtering
+                // protection would require to filter rows that are no longer matches are the coordinator.
+                Row purged = needsReconciliation() ? row : row.purge(DeletionPurger.PURGE_ALL, nowInSec, metadata.enforceStrictLiveness());
+
                 if (purged == null)
                     return null;
 
@@ -391,6 +402,13 @@ public class RowFilter implements Iterable<RowFilter.Expression>
                 newExpressions.add(e);
 
         return withNewExpressions(newExpressions);
+    }
+
+    public RowFilter withoutReconciliation()
+    {
+        if (needsReconciliation)
+            return new RowFilter(expressions, false);
+        return this;
     }
 
     public boolean hasNonKeyExpression()
@@ -924,7 +942,7 @@ public class RowFilter implements Iterable<RowFilter.Expression>
         {
             // Similarly to how we handle non-defined columns in thift, we create a fake column definition to
             // represent the target index. This is definitely something that can be improved though.
-            return ColumnMetadata.regularColumn(table, ByteBuffer.wrap(index.name.getBytes()), BytesType.instance);
+            return ColumnMetadata.regularColumn(table, ByteBuffer.wrap(index.name.getBytes()), BytesType.instance, ColumnMetadata.NO_UNIQUE_ID);
         }
 
         public IndexMetadata getTargetIndex()

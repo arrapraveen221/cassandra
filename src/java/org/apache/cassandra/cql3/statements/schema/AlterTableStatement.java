@@ -59,12 +59,16 @@ import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.Keyspaces;
 import org.apache.cassandra.schema.Keyspaces.KeyspacesDiff;
 import org.apache.cassandra.schema.MemtableParams;
+import org.apache.cassandra.schema.SchemaConstants;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.schema.TableParams;
+import org.apache.cassandra.schema.TableParams.Option;
 import org.apache.cassandra.schema.UserFunctions;
 import org.apache.cassandra.schema.ViewMetadata;
 import org.apache.cassandra.schema.Views;
 import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.service.consensus.TransactionalMode;
+import org.apache.cassandra.service.consensus.migration.TransactionalMigrationFromMode;
 import org.apache.cassandra.service.reads.repair.ReadRepairStrategy;
 import org.apache.cassandra.tcm.ClusterMetadata;
 import org.apache.cassandra.tcm.Epoch;
@@ -83,6 +87,11 @@ import static org.apache.cassandra.schema.TableMetadata.Flag;
 
 public abstract class AlterTableStatement extends AlterSchemaStatement
 {
+    private static final Logger logger = LoggerFactory.getLogger(AlterTableStatement.class);
+
+    public static final String ACCORD_COUNTER_TABLES_UNSUPPORTED = "Counters are not supported with Accord for table %s.%s";
+    public static final String ACCORD_COUNTER_COLUMN_UNSUPPORTED = "Cannot add a counter column to Accord table %s.%s with transactional mode %s and transactional migration from %s";
+
     protected final String tableName;
     private final boolean ifExists;
     protected ClientState state;
@@ -118,6 +127,9 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
                 throw ire("Table '%s.%s' doesn't exist", keyspaceName, tableName);
             return schema;
         }
+
+        if (table.params.pendingDrop)
+            throw ire("Cannot use ALTER TABLE on a table that is being dropped.");
 
         if (table.isView())
             throw ire("Cannot use ALTER TABLE on a materialized view; use ALTER MATERIALIZED VIEW instead");
@@ -257,13 +269,18 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
             private final boolean isStatic;
             @Nullable
             private final ColumnMask.Raw mask;
+            @Nullable
+            private final ColumnConstraints.Raw constraints;
 
-            Column(ColumnIdentifier name, CQL3Type.Raw type, boolean isStatic, @Nullable ColumnMask.Raw mask)
+            Column(ColumnIdentifier name, CQL3Type.Raw type, boolean isStatic, @Nullable ColumnMask.Raw mask, @Nullable ColumnConstraints.Raw constraints)
             {
                 this.name = name;
                 this.type = type;
                 this.isStatic = isStatic;
                 this.mask = mask;
+                if (constraints != null)
+                    constraints.prepare(name);
+                this.constraints = constraints;
             }
         }
 
@@ -311,12 +328,16 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
             AbstractType<?> type = column.type.prepare(keyspaceName, keyspace.types).getType();
             boolean isStatic = column.isStatic;
             ColumnMask mask = column.mask == null ? null : column.mask.prepare(keyspaceName, tableName, name, type, keyspace.userFunctions);
+            ColumnConstraints columnConstraints = column.constraints == null ? ColumnConstraints.NO_OP : column.constraints.prepare(name);
 
             if (null != tableBuilder.getColumn(name)) {
                 if (!ifColumnNotExists)
                     throw ire("Column with name '%s' already exists", name);
                 return;
             }
+
+            if (type.isCounter() && (table.params.transactionalMode.accordIsEnabled || table.params.transactionalMigrationFrom.migratingFromAccord()))
+                throw ire(format(ACCORD_COUNTER_COLUMN_UNSUPPORTED, keyspaceName, tableName, table.params.transactionalMode, table.params.transactionalMigrationFrom));
 
             if (table.isCompactTable())
                 throw ire("Cannot add new column to a COMPACT STORAGE table");
@@ -361,9 +382,9 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
             }
 
             if (isStatic)
-                tableBuilder.addStaticColumn(name, type, mask);
+                tableBuilder.addStaticColumn(name, type, mask, columnConstraints);
             else
-                tableBuilder.addRegularColumn(name, type, mask);
+                tableBuilder.addRegularColumn(name, type, mask, columnConstraints);
 
             if (!isStatic)
             {
@@ -371,8 +392,9 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
                 {
                     if (view.includeAllColumns)
                     {
-                        ColumnMetadata viewColumn = ColumnMetadata.regularColumn(view.metadata, name.bytes, type)
-                                                                  .withNewMask(mask);
+                        ColumnMetadata viewColumn = ColumnMetadata.regularColumn(view.metadata, name.bytes, type, ColumnMetadata.NO_UNIQUE_ID)
+                                                                  .withNewMask(mask)
+                                                                  .withNewColumnConstraints(columnConstraints);
                         viewsBuilder.put(viewsBuilder.get(view.name()).withAddedRegularColumn(viewColumn));
                     }
                 }
@@ -575,8 +597,49 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
                 MemtableParams.get(attrs.getString(TableParams.Option.MEMTABLE.toString()));
             Guardrails.tableProperties.guard(attrs.updatedProperties(), attrs::removeProperty, state);
 
-            validateDefaultTimeToLive(attrs.asNewTableParams());
+            validateDefaultTimeToLive(attrs.asNewTableParams(keyspaceName));
         }
+
+        private TableParams validateAndUpdateTransactionalMigration(boolean isCounter, TableParams prev, TableParams next)
+        {
+            if (next.transactionalMode.accordIsEnabled && SchemaConstants.isSystemKeyspace(keyspaceName))
+                throw ire("Cannot enable accord on system tables (%s.%s)", keyspaceName, tableName);
+
+            boolean modeChange = prev.transactionalMode != next.transactionalMode;
+            boolean wasMigrating = prev.transactionalMigrationFrom.isMigrating();
+            boolean explicitlySetMigrationFrom = attrs.hasOption(Option.TRANSACTIONAL_MIGRATION_FROM);
+            // set table to migrating
+            TransactionalMigrationFromMode newMigrateFrom = TransactionalMigrationFromMode.fromMode(prev.transactionalMode, next.transactionalMode);
+
+            if (isCounter && (next.transactionalMode != TransactionalMode.off || newMigrateFrom != TransactionalMigrationFromMode.none || next.transactionalMigrationFrom != TransactionalMigrationFromMode.none))
+                throw ire(format(ACCORD_COUNTER_TABLES_UNSUPPORTED, keyspaceName, tableName));
+
+            boolean forceMigrationChange = modeChange && explicitlySetMigrationFrom && next.transactionalMigrationFrom != newMigrateFrom;
+
+            if (modeChange && next.transactionalMode.accordIsEnabled && !DatabaseDescriptor.getAccordTransactionsEnabled())
+                throw ire(format("Cannot change transactional mode to %s for %s.%s with accord_transactions_enabled set to false",
+                                 next.transactionalMode, keyspaceName, tableName));
+
+            // user is manually updating migration mode, don't interfere
+            if (forceMigrationChange)
+            {
+                logger.warn("Forcing unsafe migration change from {} to {} with transaction mode {}", prev.transactionalMigrationFrom, next.transactionalMigrationFrom, next.transactionalMode);
+                return next;
+            }
+
+            if (!modeChange)
+                return next;
+
+            // if the user is trying to revert to the mode being migrated from, allow it. The migration states will be inverted when
+            // the transformation is applied. Otherwise throw
+            if (wasMigrating && next.transactionalMode != prev.transactionalMigrationFrom.from)
+                throw ire(format("Cannot change transactional mode from %s to %s for %s.%s before transactional migration has completed",
+                                 prev.transactionalMode, next.transactionalMode,
+                                 keyspaceName, tableName));
+
+            return next.unbuild().transactionalMigrationFrom(newMigrateFrom).build();
+        }
+
 
         public KeyspaceMetadata apply(Epoch epoch, KeyspaceMetadata keyspace, TableMetadata table, ClusterMetadata metadata)
         {
@@ -604,6 +667,8 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
 
             if (!params.compression.isEnabled())
                 Guardrails.uncompressedTablesEnabled.ensureEnabled(state);
+
+            params = validateAndUpdateTransactionalMigration(table.isCounter(), table.params, params);
 
             return keyspace.withSwapped(keyspace.tables.withSwapped(table.withSwapped(params)));
         }
@@ -710,65 +775,46 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
         }
     }
 
-    public static class DropConstraints extends AlterTableStatement
-    {
-        final ColumnIdentifier columnName;
-
-        DropConstraints(String keyspaceName, String tableName, boolean ifTableExists, ColumnIdentifier columnName)
-        {
-            super(keyspaceName, tableName, ifTableExists);
-            this.columnName = columnName;
-        }
-
-        @Override
-        public KeyspaceMetadata apply(Epoch epoch, KeyspaceMetadata keyspace, TableMetadata table, ClusterMetadata metadata)
-        {
-            ColumnMetadata columnMetadata = table.getColumn(columnName);
-            columnMetadata.removeColumnConstraints();
-
-            TableMetadata.Builder tableBuilder = table.unbuild().epoch(epoch);
-            Views.Builder viewsBuilder = keyspace.views.unbuild();
-            TableMetadata tableMetadata = tableBuilder.build();
-            tableMetadata.validate();
-
-            return keyspace.withSwapped(keyspace.tables.withSwapped(tableMetadata))
-                           .withSwapped(viewsBuilder.build());
-        }
-    }
-
     public static class AlterConstraints extends AlterTableStatement
     {
         final ColumnIdentifier columnName;
-        final ColumnConstraints constraints;
+        final ColumnConstraints.Raw constraints;
+        final boolean ifColumnExists;
 
-        AlterConstraints(String keyspaceName, String tableName, boolean ifTableExists, ColumnIdentifier columnName, ColumnConstraints constraints)
+        AlterConstraints(String keyspaceName, String tableName, boolean ifTableExists, boolean ifColumnExists, ColumnIdentifier columnName, ColumnConstraints.Raw constraints)
         {
             super(keyspaceName, tableName, ifTableExists);
             this.columnName = columnName;
             this.constraints = constraints;
+            this.ifColumnExists = ifColumnExists;
         }
 
         @Override
         public KeyspaceMetadata apply(Epoch epoch, KeyspaceMetadata keyspace, TableMetadata table, ClusterMetadata metadata)
         {
-            TableMetadata.Builder tableBuilder = table.unbuild().epoch(epoch);
 
-            for (ColumnMetadata column : tableBuilder.columns())
+            ColumnMetadata column = table.getColumn(columnName);
+            if (column != null)
             {
-                if (column.name == columnName)
-                {
-                    constraints.validate(column);
-                    column.setColumnConstraints(constraints);
-                    break;
-                }
+                ColumnConstraints oldConstraints = column.getColumnConstraints();
+                ColumnConstraints newConstraints = constraints == null ? ColumnConstraints.NO_OP : constraints.prepare(columnName);
+                if (Objects.equals(oldConstraints, newConstraints))
+                    return keyspace;
+                newConstraints.validate(column);
+                TableMetadata.Builder tableBuilder = table.unbuild().epoch(epoch);
+                tableBuilder.alterColumnConstraints(columnName, newConstraints);
+
+                TableMetadata newTable = tableBuilder.build();
+                newTable.validate();
+
+                return keyspace.withSwapped(keyspace.tables.withSwapped(newTable));
             }
-
-            Views.Builder viewsBuilder = keyspace.views.unbuild();
-            TableMetadata tableMetadata = tableBuilder.build();
-            tableMetadata.validate();
-
-            return keyspace.withSwapped(keyspace.tables.withSwapped(tableMetadata))
-                           .withSwapped(viewsBuilder.build());
+            else
+            {
+                if (!ifColumnExists)
+                    throw ire("Column '%s' doesn't exist", columnName);
+            }
+            return keyspace;
         }
     }
 
@@ -783,7 +829,6 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
             RENAME_COLUMNS,
             ALTER_OPTIONS,
             DROP_COMPACT_STORAGE,
-            DROP_CONSTRAINTS,
             ALTER_CONSTRAINTS
         }
 
@@ -792,7 +837,7 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
         private boolean ifColumnExists;
         private boolean ifColumnNotExists;
         private ColumnIdentifier constraintName;
-        private ColumnConstraints constraints;
+        private ColumnConstraints.Raw constraints;
 
         private Kind kind;
 
@@ -839,8 +884,7 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
                 case        RENAME_COLUMNS: return new RenameColumns(keyspaceName, tableName, renamedColumns, ifTableExists, ifColumnExists);
                 case         ALTER_OPTIONS: return new AlterOptions(keyspaceName, tableName, attrs, ifTableExists);
                 case  DROP_COMPACT_STORAGE: return new DropCompactStorage(keyspaceName, tableName, ifTableExists);
-                case      DROP_CONSTRAINTS: return new DropConstraints(keyspaceName, tableName, ifTableExists, constraintName);
-                case     ALTER_CONSTRAINTS: return new AlterConstraints(keyspaceName, tableName, ifTableExists, constraintName, constraints);
+                case     ALTER_CONSTRAINTS: return new AlterConstraints(keyspaceName, tableName, ifTableExists, ifColumnExists, constraintName, constraints);
             }
 
             throw new AssertionError();
@@ -858,10 +902,10 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
             rawMask = mask;
         }
 
-        public void add(ColumnIdentifier name, CQL3Type.Raw type, boolean isStatic, @Nullable ColumnMask.Raw mask)
+        public void add(ColumnIdentifier name, CQL3Type.Raw type, boolean isStatic, @Nullable ColumnMask.Raw mask, @Nullable ColumnConstraints.Raw constraints)
         {
             kind = Kind.ADD_COLUMNS;
-            addedColumns.add(new AddColumns.Column(name, type, isStatic, mask));
+            addedColumns.add(new AddColumns.Column(name, type, isStatic, mask, constraints));
         }
 
         public void drop(ColumnIdentifier name)
@@ -885,17 +929,13 @@ public abstract class AlterTableStatement extends AlterSchemaStatement
             kind = Kind.DROP_COMPACT_STORAGE;
         }
 
-        public void dropConstraints(ColumnIdentifier name)
-        {
-            kind = Kind.DROP_CONSTRAINTS;
-            this.constraintName = name;
-        }
-
-        public void alterConstraints(ColumnIdentifier name, ColumnConstraints.Raw rawConstraints)
+        public void constraint(ColumnIdentifier name, ColumnConstraints.Raw rawConstraints)
         {
             kind = Kind.ALTER_CONSTRAINTS;
             this.constraintName = name;
-            this.constraints = rawConstraints.prepare();
+            if (rawConstraints != null)
+                rawConstraints.prepare(constraintName);
+            this.constraints = rawConstraints;
         }
 
         public void timestamp(long timestamp)

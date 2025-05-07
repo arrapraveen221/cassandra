@@ -29,6 +29,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Ordering;
 
+import accord.utils.Invariants;
 import org.apache.cassandra.utils.BiLongAccumulator;
 import org.apache.cassandra.utils.BulkIterator;
 import org.apache.cassandra.utils.LongAccumulator;
@@ -68,6 +69,7 @@ public class BTree
     private static final int BRANCH_FACTOR = 1 << BRANCH_SHIFT;
     public static final int MIN_KEYS = BRANCH_FACTOR / 2 - 1;
     public static final int MAX_KEYS = BRANCH_FACTOR - 1;
+    public static final long STOP_SENTINEL_VALUE = Long.MAX_VALUE;
 
     // An empty BTree Leaf - which is the same as an empty BTree
     private static final Object[] EMPTY_LEAF = new Object[1];
@@ -137,6 +139,13 @@ public class BTree
             return buildLeaf(source, size, updateF);
 
         return buildRoot(source, size, updateF);
+    }
+
+    public static Object[] unsafeAllocateNonEmptyLeaf(int size)
+    {
+        Invariants.requireArgument(size > 0, "size should be non-zero");
+        Invariants.requireArgument(size <= MAX_KEYS, "size (%s) should be no more than %s", size, MAX_KEYS);
+        return new Object[size | 1];
     }
 
     /**
@@ -1823,7 +1832,7 @@ public class BTree
 
     private static boolean isStopSentinel(long v)
     {
-        return v == Long.MAX_VALUE;
+        return v == STOP_SENTINEL_VALUE;
     }
 
     private static <V, A> long accumulateLeaf(Object[] btree, BiLongAccumulator<A, V> accumulator, A arg, Comparator<V> comparator, V from, long initialValue)
@@ -1852,7 +1861,7 @@ public class BTree
 
     /**
      * Walk the btree and accumulate a long value using the supplied accumulator function. Iteration will stop if the
-     * accumulator function returns the sentinel values Long.MIN_VALUE or Long.MAX_VALUE
+     * accumulator function returns the sentinel value {@link #STOP_SENTINEL_VALUE}
      * <p>
      * If the optional from argument is not null, iteration will start from that value (or the one after it's insertion
      * point if an exact match isn't found)
@@ -2392,7 +2401,7 @@ public class BTree
         /**
          * Are we empty, i.e. we have no contents in either {@link #buffer} or {@link #savedBuffer}
          */
-        final boolean isEmpty()
+        public final boolean isEmpty()
         {
             return count == 0 && savedNextKey == null;
         }
@@ -3325,7 +3334,7 @@ public class BTree
         }
 
         @Override
-        void reset()
+        public void reset()
         {
             Arrays.fill(leaf().buffer, null);
             leaf().count = 0;

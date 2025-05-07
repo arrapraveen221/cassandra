@@ -30,6 +30,7 @@
         <exec executable="git" failifexecutionfails="false" failonerror="false" resultproperty="git.success" output="${build.dir}/.ratinclude">
             <arg line="ls-tree -r HEAD --name-only"/>
         </exec>
+        <exec executable="${build.helpers.dir}/rat-include-accord.sh" failifexecutionfails="false" failonerror="false" resultproperty="git.success"  output="${build.dir}/.ratinclude" append="true" />
         <condition property="rat.skip" value="true">
             <not>
                 <equals arg1="${git.success}" arg2="0"/>
@@ -41,6 +42,8 @@
         <rat:report reportFile="${build.dir}/rat.txt">
             <fileset dir="." includesfile="${build.dir}/.ratinclude">
                  <!-- Config files with not much creativity -->
+                 <exclude name=".asf.yaml"/>
+                 <exclude name=".snyk"/>
                  <exclude name="**/cassandra*.yaml"/>
                  <exclude NAME="doc/antora.yml"/>
                  <exclude name="ide/**/*"/>
@@ -76,6 +79,7 @@
                  <exclude NAME="CHANGES.txt"/>
                  <exclude NAME="CASSANDRA-14092.txt"/>
                  <exclude NAME="debian/TODO"/>
+                 <exclude NAME="accord_demo.txt"/>
                  <!-- legal files -->
                  <exclude NAME="NOTICE.txt"/>
                  <exclude NAME="LICENSE.txt"/>
